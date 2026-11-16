@@ -83,6 +83,7 @@ pub enum CameraControl {
     SetContrast(f32),      // 0.5 to 2.0
     SetFocusPeaking(bool), // Neon green edge highlight for in-focus PCB traces
     SetAntiFlicker(AntiFlickerMode),
+    SetActionShutter(bool), // Fast shutter speed (Anti-ghosting / no motion trails)
     Stop,
 }
 
@@ -168,22 +169,32 @@ fn open_camera(device_idx: u32, resolution: VideoResolution) -> Option<Camera> {
     let (w, h) = resolution.dimensions();
     let index = CameraIndex::Index(device_idx);
 
-    // Prefer NV12 (direct hardware YUV/NV12 streaming, zero MJPEG dropped blocks)
-    // with seamless fallback to MJPEG
+    // 1. Primary: High-framerate MJPEG @ 60 FPS
+    // (Bypasses USB 2.0 480Mbps bottleneck, eliminates frame-rate throttling & motion blur)
+    let requested_mjpeg_60 = RequestedFormat::new::<RgbAFormat>(RequestedFormatType::Closest(
+        CameraFormat::new(Resolution::new(w, h), FrameFormat::MJPEG, 60),
+    ));
+
+    // 2. Secondary: MJPEG @ 30 FPS
+    let requested_mjpeg_30 = RequestedFormat::new::<RgbAFormat>(RequestedFormatType::Closest(
+        CameraFormat::new(Resolution::new(w, h), FrameFormat::MJPEG, 30),
+    ));
+
+    // 3. Fallback: NV12 @ 30 FPS
     let requested_nv12 = RequestedFormat::new::<RgbAFormat>(RequestedFormatType::Closest(
         CameraFormat::new(Resolution::new(w, h), FrameFormat::NV12, 30),
     ));
 
-    let camera_res = Camera::new(index.clone(), requested_nv12).or_else(|_| {
-        let requested_mjpeg = RequestedFormat::new::<RgbAFormat>(RequestedFormatType::Closest(
-            CameraFormat::new(Resolution::new(w, h), FrameFormat::MJPEG, 30),
-        ));
-        Camera::new(index, requested_mjpeg)
-    });
+    let camera_res = Camera::new(index.clone(), requested_mjpeg_60)
+        .or_else(|_| Camera::new(index.clone(), requested_mjpeg_30))
+        .or_else(|_| Camera::new(index, requested_nv12));
 
     let mut camera = camera_res.ok()?;
     camera.open_stream().ok()?;
-    let _ = camera.set_frame_rate(30);
+
+    // Negotiate highest supported framerate (60 -> 30)
+    let _ = camera.set_frame_rate(60).or_else(|_| camera.set_frame_rate(30));
+
     Some(camera)
 }
 
@@ -202,6 +213,7 @@ fn run_capture_loop(
 
     // Advanced Camera Engine Settings
     let mut auto_ev = true;
+    let mut action_shutter = true; // Fast shutter anti-ghosting enabled by default!
     let mut ev_bias = 0.0f32;
     let mut brightness = 0i32;
     let mut contrast = 1.0f32;
@@ -236,6 +248,7 @@ fn run_capture_loop(
                 CameraControl::SetRotate(deg) => rotation_deg = deg,
                 CameraControl::SetZoom(zoom) => zoom_level = zoom,
                 CameraControl::SetFreeze(freeze) => is_frozen = freeze,
+                CameraControl::SetActionShutter(action) => action_shutter = action,
                 CameraControl::SetAutoFocus(af) => {
                     // Attempt hardware UVC focus control if camera supports it
                     if let Some(ref mut cam) = camera {
@@ -298,8 +311,9 @@ fn run_capture_loop(
                             1.0f32
                         };
 
-                        // Smooth gain with exponential moving average to prevent exposure breathing
-                        smooth_ev_gain = smooth_ev_gain * 0.88 + target_gain * 0.12;
+                        // In Action Shutter mode, react instantly with faster alpha to avoid trailing exposure ghosting
+                        let alpha = if action_shutter { 0.35f32 } else { 0.12f32 };
+                        smooth_ev_gain = smooth_ev_gain * (1.0 - alpha) + target_gain * alpha;
                         let ev_multiplier = smooth_ev_gain * 2.0f32.powf(ev_bias);
 
                         // 2. Apply transforms: Zoom -> Flip -> Rotate -> EV/Contrast LUT -> Peaking

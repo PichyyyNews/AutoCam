@@ -1,3 +1,5 @@
+#![windows_subsystem = "windows"]
+
 mod camera;
 mod icons;
 mod theme;
@@ -63,6 +65,7 @@ pub struct AutoCamApp {
     // Camera Engine Controls
     grid_mode: GridMode,
     is_loading_camera: bool,
+    action_shutter: bool,
     auto_focus: bool,
     manual_focus: u32,
     auto_ev: bool,
@@ -102,6 +105,7 @@ pub enum Message {
 
     // Advanced Camera Engine Messages
     CycleGridMode,
+    ToggleActionShutter,
     ToggleAutoFocus,
     SetManualFocus(u32),
     ToggleAutoEv,
@@ -154,6 +158,7 @@ impl AutoCamApp {
 
                 grid_mode: GridMode::Off,
                 is_loading_camera: false,
+                action_shutter: true,
                 auto_focus: true,
                 manual_focus: 50,
                 auto_ev: true,
@@ -171,7 +176,7 @@ impl AutoCamApp {
 
     pub fn subscription(&self) -> Subscription<Message> {
         Subscription::batch(vec![
-            iced::time::every(Duration::from_millis(16)).map(|_| Message::Tick),
+            iced::time::every(Duration::from_millis(8)).map(|_| Message::Tick),
             iced::time::every(Duration::from_millis(1500)).map(|_| Message::PollDevices),
             keyboard::listen().map(Message::KeyboardEvent),
         ])
@@ -369,6 +374,14 @@ impl AutoCamApp {
 
             Message::CycleGridMode => {
                 self.grid_mode = self.grid_mode.next();
+                Task::none()
+            }
+
+            Message::ToggleActionShutter => {
+                self.action_shutter = !self.action_shutter;
+                if let Some(ref mgr) = self.camera_manager {
+                    mgr.send(CameraControl::SetActionShutter(self.action_shutter));
+                }
                 Task::none()
             }
 
@@ -1036,6 +1049,19 @@ impl AutoCamApp {
                 .color(theme::COLOR_TEXT_MUTED),
             container(
                 column![
+                    // Anti-Ghosting Fast Shutter
+                    row![
+                        render_svg(icons::ICON_CAMERA, 14.0, self.action_shutter, false),
+                        text("Anti-Ghosting (High-Speed Shutter)")
+                            .size(11)
+                            .color(theme::COLOR_TEXT),
+                        Space::new().width(Fill),
+                        button(text(if self.action_shutter { "Active" } else { "Off" }).size(10))
+                            .on_press(Message::ToggleActionShutter)
+                            .style(theme::clean_button_style(self.action_shutter, false))
+                            .padding([2, 8]),
+                    ]
+                    .align_y(Alignment::Center),
                     // Focus Peaking
                     row![
                         render_svg(icons::ICON_PEAKING, 14.0, self.focus_peaking, false),
