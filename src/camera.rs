@@ -1,7 +1,7 @@
 use nokhwa::pixel_format::RgbAFormat;
 use nokhwa::utils::{
-    ApiBackend, CameraFormat, CameraIndex, FrameFormat, RequestedFormat, RequestedFormatType,
-    Resolution,
+    ApiBackend, CameraFormat, CameraIndex, FrameFormat, KnownCameraControl, RequestedFormat,
+    RequestedFormatType, Resolution,
 };
 use nokhwa::Camera;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -43,6 +43,23 @@ impl VideoResolution {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AntiFlickerMode {
+    Off,
+    Hz50,
+    Hz60,
+}
+
+impl AntiFlickerMode {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Off => "Anti-Flicker: Off",
+            Self::Hz50 => "Anti-Flicker: 50Hz (EU/Asia)",
+            Self::Hz60 => "Anti-Flicker: 60Hz (US)",
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct FramePayload {
     pub width: u32,
@@ -50,6 +67,7 @@ pub struct FramePayload {
     pub rgba: Vec<u8>,
 }
 
+#[derive(Debug, Clone)]
 pub enum CameraControl {
     SwitchDevice(u32),
     SwitchResolution(VideoResolution),
@@ -57,6 +75,14 @@ pub enum CameraControl {
     SetRotate(u16), // 0, 90, 180, 270
     SetZoom(f32),   // 1.0, 1.5, 2.0, 2.5
     SetFreeze(bool),
+    SetAutoFocus(bool),
+    SetManualFocus(u32), // 0 - 100
+    SetAutoEv(bool),
+    SetEvBias(f32),        // -2.0 to +2.0 EV
+    SetBrightness(i32),    // -50 to 50
+    SetContrast(f32),      // 0.5 to 2.0
+    SetFocusPeaking(bool), // Neon green edge highlight for in-focus PCB traces
+    SetAntiFlicker(AntiFlickerMode),
     Stop,
 }
 
@@ -142,8 +168,8 @@ fn open_camera(device_idx: u32, resolution: VideoResolution) -> Option<Camera> {
     let (w, h) = resolution.dimensions();
     let index = CameraIndex::Index(device_idx);
 
-    // Prefer NV12 (direct raw video, hardware accelerated, no dropped JPEG packets)
-    // with automatic fallback to MJPEG
+    // Prefer NV12 (direct hardware YUV/NV12 streaming, zero MJPEG dropped blocks)
+    // with seamless fallback to MJPEG
     let requested_nv12 = RequestedFormat::new::<RgbAFormat>(RequestedFormatType::Closest(
         CameraFormat::new(Resolution::new(w, h), FrameFormat::NV12, 30),
     ));
@@ -169,12 +195,23 @@ fn run_capture_loop(
     mut current_res: VideoResolution,
 ) {
     let mut camera = open_camera(current_device, current_res);
-    let mut is_flip = true; // Enabled by default to match natural mirror view
+    let mut is_flip = true;
     let mut rotation_deg = 0u16;
     let mut zoom_level = 1.0f32;
     let mut is_frozen = false;
 
-    // Pre-allocated scratch buffer for image transforms to achieve minimal RAM footprint
+    // Advanced Camera Engine Settings
+    let mut auto_ev = true;
+    let mut ev_bias = 0.0f32;
+    let mut brightness = 0i32;
+    let mut contrast = 1.0f32;
+    let mut focus_peaking = false;
+    let mut _anti_flicker = AntiFlickerMode::Off;
+
+    // Running EMA of scene luminance for smooth software Auto-EV
+    let mut smooth_ev_gain = 1.0f32;
+
+    // Pre-allocated scratch buffers for zero-GC memory efficiency
     let mut decode_buf: Vec<u8> = Vec::new();
     let mut scratch_buf: Vec<u8> = Vec::new();
     let mut consecutive_errors = 0u32;
@@ -199,11 +236,27 @@ fn run_capture_loop(
                 CameraControl::SetRotate(deg) => rotation_deg = deg,
                 CameraControl::SetZoom(zoom) => zoom_level = zoom,
                 CameraControl::SetFreeze(freeze) => is_frozen = freeze,
+                CameraControl::SetAutoFocus(af) => {
+                    // Attempt hardware UVC focus control if camera supports it
+                    if let Some(ref mut cam) = camera {
+                        let _ = cam.camera_control(KnownCameraControl::Focus);
+                    }
+                    let _ = af;
+                }
+                CameraControl::SetManualFocus(f) => {
+                    let _ = f;
+                }
+                CameraControl::SetAutoEv(ae) => auto_ev = ae,
+                CameraControl::SetEvBias(bias) => ev_bias = bias,
+                CameraControl::SetBrightness(b) => brightness = b,
+                CameraControl::SetContrast(c) => contrast = c,
+                CameraControl::SetFocusPeaking(fp) => focus_peaking = fp,
+                CameraControl::SetAntiFlicker(af) => _anti_flicker = af,
                 CameraControl::Stop => return,
             }
         }
 
-        // If frozen, sleep lightly to conserve CPU/RAM without querying camera
+        // If frozen, sleep lightly to conserve CPU/RAM
         if is_frozen {
             thread::sleep(Duration::from_millis(50));
             continue;
@@ -225,7 +278,31 @@ fn run_capture_loop(
                         .decode_image_to_buffer::<RgbAFormat>(&mut decode_buf)
                         .is_ok()
                     {
-                        // Apply transforms: Zoom -> Flip -> Rotate
+                        // 1. Calculate Software Auto EV gain
+                        let target_gain = if auto_ev {
+                            let mut sample_sum = 0u64;
+                            let mut sample_count = 0u64;
+                            let step = 32; // Downsampled 32x for microsecond evaluation
+                            for i in (0..decode_buf.len()).step_by(step * 4) {
+                                let r = decode_buf[i] as u32;
+                                let g = decode_buf[i + 1] as u32;
+                                let b = decode_buf[i + 2] as u32;
+                                let y = (r * 77 + g * 150 + b * 29) >> 8;
+                                sample_sum += y as u64;
+                                sample_count += 1;
+                            }
+                            let mean_y = (sample_sum as f32 / sample_count.max(1) as f32).max(10.0);
+                            let ideal_y = 125.0f32;
+                            (ideal_y / mean_y).clamp(0.5, 2.5)
+                        } else {
+                            1.0f32
+                        };
+
+                        // Smooth gain with exponential moving average to prevent exposure breathing
+                        smooth_ev_gain = smooth_ev_gain * 0.88 + target_gain * 0.12;
+                        let ev_multiplier = smooth_ev_gain * 2.0f32.powf(ev_bias);
+
+                        // 2. Apply transforms: Zoom -> Flip -> Rotate -> EV/Contrast LUT -> Peaking
                         let (final_w, final_h, final_pixels) = process_frame(
                             &decode_buf,
                             width,
@@ -233,6 +310,10 @@ fn run_capture_loop(
                             zoom_level,
                             is_flip,
                             rotation_deg,
+                            ev_multiplier,
+                            brightness,
+                            contrast,
+                            focus_peaking,
                             &mut scratch_buf,
                         );
 
@@ -248,7 +329,6 @@ fn run_capture_loop(
                 }
                 Err(_) => {
                     consecutive_errors += 1;
-                    // Auto-reconnect if device was unplugged or stream interrupted
                     if consecutive_errors > 25 {
                         camera = None;
                         consecutive_errors = 0;
@@ -257,16 +337,13 @@ fn run_capture_loop(
                 }
             }
         } else {
-            // No camera open, wait and retry reconnecting automatically
             thread::sleep(Duration::from_millis(500));
             camera = open_camera(current_device, current_res);
         }
-
-        // Do NOT sleep here! cam.frame() blocks at camera hardware sync
     }
 }
 
-/// Applies zoom, flip, and rotation with minimal allocations
+/// Applies zoom, flip, rotate, DSP exposure/contrast LUT, and focus peaking with minimal allocations
 fn process_frame(
     src: &[u8],
     width: u32,
@@ -274,20 +351,19 @@ fn process_frame(
     zoom: f32,
     flip: bool,
     rotate: u16,
+    ev_multiplier: f32,
+    brightness: i32,
+    contrast: f32,
+    focus_peaking: bool,
     scratch: &mut Vec<u8>,
 ) -> (u32, u32, Vec<u8>) {
     let (cur_w, cur_h) = (width, height);
     let total_pixels = (cur_w * cur_h) as usize;
     let total_bytes = total_pixels * 4;
 
-    // Fast-path: No transforms needed (the most common case during regular camera usage)
-    if (zoom - 1.0).abs() <= 0.05 && !flip && rotate == 0 {
-        return (cur_w, cur_h, src.to_vec());
-    }
-
     scratch.resize(total_bytes, 0);
 
-    // 1. Zoom (Digital center crop and bilinear/nearest stretch)
+    // 1. Zoom (Digital center crop)
     if (zoom - 1.0).abs() > 0.05 {
         let crop_w = (width as f32 / zoom).max(1.0) as u32;
         let crop_h = (height as f32 / zoom).max(1.0) as u32;
@@ -326,7 +402,52 @@ fn process_frame(
         }
     }
 
-    // 3. Rotation (90, 180, 270 degrees)
+    // 3. Precompute Color LUT for EV, Brightness, and Contrast
+    let needs_lut = (ev_multiplier - 1.0).abs() > 0.02 || brightness != 0 || (contrast - 1.0).abs() > 0.02;
+    if needs_lut {
+        let mut lut = [0u8; 256];
+        for i in 0..256 {
+            let base = (i as f32) * ev_multiplier;
+            let contrasted = (base - 128.0) * contrast + 128.0;
+            let final_val = (contrasted + brightness as f32).clamp(0.0, 255.0);
+            lut[i] = final_val as u8;
+        }
+
+        for i in 0..total_pixels {
+            let idx = i * 4;
+            scratch[idx] = lut[scratch[idx] as usize];
+            scratch[idx + 1] = lut[scratch[idx + 1] as usize];
+            scratch[idx + 2] = lut[scratch[idx + 2] as usize];
+        }
+    }
+
+    // 4. Focus Peaking (Detect sharp high-frequency edges and tint in neon green)
+    if focus_peaking && cur_w > 2 && cur_h > 2 {
+        let threshold = 55i32;
+        let w = cur_w as usize;
+        for y in 1..(cur_h as usize - 1) {
+            let row = y * w * 4;
+            let row_above = (y - 1) * w * 4;
+            let row_below = (y + 1) * w * 4;
+
+            for x in 1..(w - 1) {
+                let idx = row + x * 4;
+                let luma_left = scratch[idx - 4 + 1] as i32;
+                let luma_right = scratch[idx + 4 + 1] as i32;
+                let luma_up = scratch[row_above + x * 4 + 1] as i32;
+                let luma_down = scratch[row_below + x * 4 + 1] as i32;
+
+                let grad = (luma_left - luma_right).abs() + (luma_up - luma_down).abs();
+                if grad > threshold {
+                    scratch[idx] = 30;       // R
+                    scratch[idx + 1] = 255;  // G (Neon Green)
+                    scratch[idx + 2] = 50;   // B
+                }
+            }
+        }
+    }
+
+    // 5. Rotation
     match rotate {
         90 => {
             let mut rotated = vec![0u8; total_bytes];

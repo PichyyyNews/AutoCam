@@ -115,6 +115,7 @@ name = "autocam"
 version = "0.0.1"
 dependencies = [
  "iced",
+ "image",
  "nokhwa",
  "rusqlite",
  "winres",

@@ -2,17 +2,45 @@ mod camera;
 mod icons;
 mod theme;
 
-use camera::{CameraControl, CameraDeviceInfo, CameraManager, VideoResolution};
+use camera::{
+    AntiFlickerMode, CameraControl, CameraDeviceInfo, CameraManager, FramePayload, VideoResolution,
+};
 use iced::keyboard::{self, key, Key};
 use iced::mouse;
 use iced::widget::{
-    button, column, container, image, mouse_area, pick_list, row, stack, svg, text, tooltip, Space,
+    button, column, container, image, mouse_area, pick_list, row, slider, stack, svg, text, tooltip,
+    Space,
 };
 use iced::window;
-use iced::{Alignment, ContentFit, Element, Fill, Length, Subscription, Task};
-use std::time::Duration;
+use iced::{Alignment, Background, Color, ContentFit, Element, Fill, Length, Subscription, Task};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const APP_ICON_BYTES: &[u8] = include_bytes!("../public/icon.png");
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GridMode {
+    Off,
+    RuleOfThirds,
+    CenterCrosshair,
+}
+
+impl GridMode {
+    pub fn next(&self) -> Self {
+        match self {
+            Self::Off => Self::RuleOfThirds,
+            Self::RuleOfThirds => Self::CenterCrosshair,
+            Self::CenterCrosshair => Self::Off,
+        }
+    }
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Off => "Grid: Off [G]",
+            Self::RuleOfThirds => "Grid: 3x3 Rule of Thirds [G]",
+            Self::CenterCrosshair => "Grid: Center Crosshair [G]",
+        }
+    }
+}
 
 pub struct AutoCamApp {
     camera_manager: Option<CameraManager>,
@@ -31,6 +59,20 @@ pub struct AutoCamApp {
     app_icon_handle: image::Handle,
     frame_count: u64,
     status_text: String,
+
+    // Camera Engine Controls
+    grid_mode: GridMode,
+    is_loading_camera: bool,
+    auto_focus: bool,
+    manual_focus: u32,
+    auto_ev: bool,
+    ev_bias: f32,
+    brightness: i32,
+    contrast: f32,
+    focus_peaking: bool,
+    anti_flicker: AntiFlickerMode,
+    latest_frame: Option<FramePayload>,
+    snapshot_toast: Option<(String, Instant)>,
 }
 
 #[derive(Debug, Clone)]
@@ -57,6 +99,18 @@ pub enum Message {
     MinimizeWindow,
     CloseWindow,
     RefreshDevices,
+
+    // Advanced Camera Engine Messages
+    CycleGridMode,
+    ToggleAutoFocus,
+    SetManualFocus(u32),
+    ToggleAutoEv,
+    SetEvBias(f32),
+    SetBrightness(i32),
+    SetContrast(f32),
+    ToggleFocusPeaking,
+    SetAntiFlicker(AntiFlickerMode),
+    CaptureSnapshot,
 }
 
 impl AutoCamApp {
@@ -97,6 +151,19 @@ impl AutoCamApp {
                 app_icon_handle: image::Handle::from_bytes(APP_ICON_BYTES),
                 frame_count: 0,
                 status_text,
+
+                grid_mode: GridMode::Off,
+                is_loading_camera: false,
+                auto_focus: true,
+                manual_focus: 50,
+                auto_ev: true,
+                ev_bias: 0.0,
+                brightness: 0,
+                contrast: 1.0,
+                focus_peaking: false,
+                anti_flicker: AntiFlickerMode::Off,
+                latest_frame: None,
+                snapshot_toast: None,
             },
             Task::none(),
         )
@@ -110,17 +177,29 @@ impl AutoCamApp {
         ])
     }
 
+    pub fn theme(&self) -> iced::Theme {
+        iced::Theme::Dark
+    }
+
     pub fn update(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::Tick => {
                 if let Some(ref mgr) = self.camera_manager {
                     if let Some(frame) = mgr.take_latest_frame() {
                         self.frame_count += 1;
+                        self.is_loading_camera = false; // Transition smoothly from loader to live
                         self.image_handle = Some(image::Handle::from_rgba(
                             frame.width,
                             frame.height,
-                            frame.rgba,
+                            frame.rgba.clone(),
                         ));
+                        self.latest_frame = Some(frame);
+                    }
+                }
+                // Check if snapshot toast expired (after 3 seconds)
+                if let Some((_, created_at)) = self.snapshot_toast {
+                    if created_at.elapsed() > Duration::from_secs(3) {
+                        self.snapshot_toast = None;
                     }
                 }
                 Task::none()
@@ -165,28 +244,38 @@ impl AutoCamApp {
                 if let keyboard::Event::KeyPressed { key, .. } = event {
                     match key {
                         Key::Named(key::Named::Space) => return self.update(Message::ToggleFreeze),
-                        Key::Named(key::Named::F11) => return self.update(Message::ToggleFullscreen),
-                        Key::Named(key::Named::Escape) => {
-                            if self.show_settings {
-                                self.show_settings = false;
-                            } else if self.is_fullscreen {
-                                return self.update(Message::ToggleFullscreen);
-                            }
+                        Key::Character(c) if c.eq_ignore_ascii_case("f") => {
+                            return self.update(Message::ToggleFlip)
                         }
-                        Key::Character(ref ch) => {
-                            if ch.eq_ignore_ascii_case("f") {
-                                return self.update(Message::ToggleFlip);
-                            } else if ch.eq_ignore_ascii_case("r") {
-                                return self.update(Message::RotateNext);
-                            } else if ch.eq_ignore_ascii_case("p") {
-                                return self.update(Message::TogglePip);
-                            } else if ch.eq_ignore_ascii_case("s") {
-                                return self.update(Message::ToggleSettings);
-                            } else if ch == "+" || ch == "=" {
-                                return self.update(Message::ZoomIn);
-                            } else if ch == "-" {
-                                return self.update(Message::ZoomOut);
-                            }
+                        Key::Character(c) if c.eq_ignore_ascii_case("r") => {
+                            return self.update(Message::RotateNext)
+                        }
+                        Key::Character(c) if c.eq_ignore_ascii_case("p") => {
+                            return self.update(Message::TogglePip)
+                        }
+                        Key::Character(c) if c.eq_ignore_ascii_case("s") => {
+                            return self.update(Message::ToggleSettings)
+                        }
+                        Key::Character(c) if c.eq_ignore_ascii_case("g") => {
+                            return self.update(Message::CycleGridMode)
+                        }
+                        Key::Character(c) if c.eq_ignore_ascii_case("a") => {
+                            return self.update(Message::ToggleAutoFocus)
+                        }
+                        Key::Character(c) if c.eq_ignore_ascii_case("e") => {
+                            return self.update(Message::ToggleAutoEv)
+                        }
+                        Key::Character(c) if c.eq_ignore_ascii_case("c") => {
+                            return self.update(Message::CaptureSnapshot)
+                        }
+                        Key::Character(c) if c == "-" || c == "_" => {
+                            return self.update(Message::ZoomOut)
+                        }
+                        Key::Character(c) if c == "=" || c == "+" => {
+                            return self.update(Message::ZoomIn)
+                        }
+                        Key::Named(key::Named::F11) => {
+                            return self.update(Message::ToggleFullscreen)
                         }
                         _ => {}
                     }
@@ -194,32 +283,41 @@ impl AutoCamApp {
                 Task::none()
             }
 
-            Message::DeviceSelected(device) => {
-                self.selected_device = Some(device.clone());
+            Message::DeviceSelected(dev) => {
+                self.selected_device = Some(dev.clone());
+                self.status_text = format!("Connected: {}", dev.name);
+                self.is_loading_camera = true; // Show smooth freeze-to-live spinner
+
                 if let Some(ref mgr) = self.camera_manager {
-                    mgr.send(CameraControl::SwitchDevice(device.index));
-                    mgr.send(CameraControl::SetFlip(self.is_flip));
+                    mgr.send(CameraControl::SwitchDevice(dev.index));
                 } else {
-                    let (mgr, _) = CameraManager::start(device.index, self.resolution);
+                    let (mgr, _) = CameraManager::start(dev.index, self.resolution);
                     mgr.send(CameraControl::SetFlip(self.is_flip));
+                    mgr.send(CameraControl::SetRotate(self.rotation_deg));
+                    mgr.send(CameraControl::SetZoom(self.zoom_level));
+                    mgr.send(CameraControl::SetAutoEv(self.auto_ev));
+                    mgr.send(CameraControl::SetEvBias(self.ev_bias));
+                    mgr.send(CameraControl::SetBrightness(self.brightness));
+                    mgr.send(CameraControl::SetContrast(self.contrast));
+                    mgr.send(CameraControl::SetFocusPeaking(self.focus_peaking));
                     self.camera_manager = Some(mgr);
                 }
-                self.status_text = format!("Connected: {}", device.name);
                 Task::none()
             }
 
             Message::ToggleResolution => {
-                let next = match self.resolution {
+                let next_res = match self.resolution {
                     VideoResolution::Hd720p => VideoResolution::Fhd1080p,
                     VideoResolution::Fhd1080p => VideoResolution::Hd720p,
                 };
-                self.update(Message::SetResolution(next))
+                self.update(Message::SetResolution(next_res))
             }
 
             Message::SetResolution(res) => {
                 self.resolution = res;
+                self.is_loading_camera = true;
                 if let Some(ref mgr) = self.camera_manager {
-                    mgr.send(CameraControl::SwitchResolution(self.resolution));
+                    mgr.send(CameraControl::SwitchResolution(res));
                 }
                 Task::none()
             }
@@ -240,6 +338,129 @@ impl AutoCamApp {
                 Task::none()
             }
 
+            Message::RotateNext => {
+                self.rotation_deg = match self.rotation_deg {
+                    0 => 90,
+                    90 => 180,
+                    180 => 270,
+                    _ => 0,
+                };
+                if let Some(ref mgr) = self.camera_manager {
+                    mgr.send(CameraControl::SetRotate(self.rotation_deg));
+                }
+                Task::none()
+            }
+
+            Message::ZoomIn => {
+                self.zoom_level = (self.zoom_level + 0.25).min(3.0);
+                if let Some(ref mgr) = self.camera_manager {
+                    mgr.send(CameraControl::SetZoom(self.zoom_level));
+                }
+                Task::none()
+            }
+
+            Message::ZoomOut => {
+                self.zoom_level = (self.zoom_level - 0.25).max(1.0);
+                if let Some(ref mgr) = self.camera_manager {
+                    mgr.send(CameraControl::SetZoom(self.zoom_level));
+                }
+                Task::none()
+            }
+
+            Message::CycleGridMode => {
+                self.grid_mode = self.grid_mode.next();
+                Task::none()
+            }
+
+            Message::ToggleAutoFocus => {
+                self.auto_focus = !self.auto_focus;
+                if let Some(ref mgr) = self.camera_manager {
+                    mgr.send(CameraControl::SetAutoFocus(self.auto_focus));
+                }
+                Task::none()
+            }
+
+            Message::SetManualFocus(val) => {
+                self.manual_focus = val;
+                self.auto_focus = false;
+                if let Some(ref mgr) = self.camera_manager {
+                    mgr.send(CameraControl::SetManualFocus(val));
+                }
+                Task::none()
+            }
+
+            Message::ToggleAutoEv => {
+                self.auto_ev = !self.auto_ev;
+                if let Some(ref mgr) = self.camera_manager {
+                    mgr.send(CameraControl::SetAutoEv(self.auto_ev));
+                }
+                Task::none()
+            }
+
+            Message::SetEvBias(val) => {
+                self.ev_bias = val;
+                if let Some(ref mgr) = self.camera_manager {
+                    mgr.send(CameraControl::SetEvBias(val));
+                }
+                Task::none()
+            }
+
+            Message::SetBrightness(val) => {
+                self.brightness = val;
+                if let Some(ref mgr) = self.camera_manager {
+                    mgr.send(CameraControl::SetBrightness(val));
+                }
+                Task::none()
+            }
+
+            Message::SetContrast(val) => {
+                self.contrast = val;
+                if let Some(ref mgr) = self.camera_manager {
+                    mgr.send(CameraControl::SetContrast(val));
+                }
+                Task::none()
+            }
+
+            Message::ToggleFocusPeaking => {
+                self.focus_peaking = !self.focus_peaking;
+                if let Some(ref mgr) = self.camera_manager {
+                    mgr.send(CameraControl::SetFocusPeaking(self.focus_peaking));
+                }
+                Task::none()
+            }
+
+            Message::SetAntiFlicker(mode) => {
+                self.anti_flicker = mode;
+                if let Some(ref mgr) = self.camera_manager {
+                    mgr.send(CameraControl::SetAntiFlicker(mode));
+                }
+                Task::none()
+            }
+
+            Message::CaptureSnapshot => {
+                if let Some(ref frame) = self.latest_frame {
+                    let _ = std::fs::create_dir_all("captures");
+                    let timestamp = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0);
+                    let filename = format!("captures/autocam_{}.png", timestamp);
+
+                    if ::image::save_buffer(
+                        &filename,
+                        &frame.rgba,
+                        frame.width,
+                        frame.height,
+                        ::image::ExtendedColorType::Rgba8,
+                    )
+                    .is_ok()
+                    {
+                        self.snapshot_toast = Some((filename, Instant::now()));
+                    }
+                }
+                Task::none()
+            }
+
             Message::ToggleFullscreen => {
                 self.is_fullscreen = !self.is_fullscreen;
                 let mode = if self.is_fullscreen {
@@ -255,44 +476,8 @@ impl AutoCamApp {
                 Task::none()
             }
 
-            Message::RotateNext => {
-                self.rotation_deg = match self.rotation_deg {
-                    0 => 90,
-                    90 => 180,
-                    180 => 270,
-                    _ => 0,
-                };
-                if let Some(ref mgr) = self.camera_manager {
-                    mgr.send(CameraControl::SetRotate(self.rotation_deg));
-                }
-                Task::none()
-            }
-
-            Message::ZoomIn => {
-                if self.zoom_level < 2.5 {
-                    self.zoom_level = (self.zoom_level + 0.5).min(2.5);
-                    if let Some(ref mgr) = self.camera_manager {
-                        mgr.send(CameraControl::SetZoom(self.zoom_level));
-                    }
-                }
-                Task::none()
-            }
-
-            Message::ZoomOut => {
-                if self.zoom_level > 1.0 {
-                    self.zoom_level = (self.zoom_level - 0.5).max(1.0);
-                    if let Some(ref mgr) = self.camera_manager {
-                        mgr.send(CameraControl::SetZoom(self.zoom_level));
-                    }
-                }
-                Task::none()
-            }
-
             Message::TogglePip => {
                 self.is_pip = !self.is_pip;
-                self.pip_hovered = false;
-                self.show_settings = false;
-
                 if self.is_pip {
                     Task::batch(vec![
                         window::latest().and_then(|id| {
@@ -359,8 +544,8 @@ impl AutoCamApp {
     /// Full Normal Mode with Custom Draggable Title Bar and Circuit Teaching Tools
     fn view_normal(&self) -> Element<'_, Message> {
         let app_logo = image(self.app_icon_handle.clone())
-            .width(Length::Fixed(18.0))
-            .height(Length::Fixed(18.0));
+            .width(Length::Fixed(23.0))
+            .height(Length::Fixed(23.0));
 
         // 1. Draggable Top Title Bar
         let title_bar = mouse_area(
@@ -368,7 +553,6 @@ impl AutoCamApp {
                 row![
                     app_logo,
                     text("AutoCam").size(13).color(theme::COLOR_TEXT),
-                    text("Teaching").size(11).color(theme::COLOR_TEXT_MUTED),
                     Space::new().width(Length::Fixed(10.0)),
                     // Quick camera device selector
                     pick_list(
@@ -376,6 +560,7 @@ impl AutoCamApp {
                         self.selected_device.clone(),
                         Message::DeviceSelected,
                     )
+                    .style(theme::pick_list_style)
                     .text_size(12)
                     .padding([3, 8]),
                     // Resolution Toggle Button
@@ -477,12 +662,145 @@ impl AutoCamApp {
 
         let mut viewport_stack = vec![video_content];
 
-        // If Settings view is open, show modal overlay centered over viewport
+        // 2a. Grid Overlay for Circuit Alignment / Framing
+        match self.grid_mode {
+            GridMode::Off => {}
+            GridMode::RuleOfThirds => {
+                let grid_lines = container(
+                    stack![
+                        // Horizontal 3x3 lines
+                        column![
+                            Space::new().height(Fill),
+                            container(Space::new().width(Fill).height(Length::Fixed(1.0)))
+                                .style(|_| container::Style {
+                                    background: Some(Background::Color(Color::from_rgba(1.0, 1.0, 1.0, 0.22))),
+                                    ..Default::default()
+                                }),
+                            Space::new().height(Fill),
+                            container(Space::new().width(Fill).height(Length::Fixed(1.0)))
+                                .style(|_| container::Style {
+                                    background: Some(Background::Color(Color::from_rgba(1.0, 1.0, 1.0, 0.22))),
+                                    ..Default::default()
+                                }),
+                            Space::new().height(Fill),
+                        ]
+                        .width(Fill)
+                        .height(Fill),
+                        // Vertical 3x3 lines
+                        row![
+                            Space::new().width(Fill),
+                            container(Space::new().width(Length::Fixed(1.0)).height(Fill))
+                                .style(|_| container::Style {
+                                    background: Some(Background::Color(Color::from_rgba(1.0, 1.0, 1.0, 0.22))),
+                                    ..Default::default()
+                                }),
+                            Space::new().width(Fill),
+                            container(Space::new().width(Length::Fixed(1.0)).height(Fill))
+                                .style(|_| container::Style {
+                                    background: Some(Background::Color(Color::from_rgba(1.0, 1.0, 1.0, 0.22))),
+                                    ..Default::default()
+                                }),
+                            Space::new().width(Fill),
+                        ]
+                        .width(Fill)
+                        .height(Fill),
+                    ]
+                    .width(Fill)
+                    .height(Fill),
+                )
+                .width(Fill)
+                .height(Fill)
+                .into();
+
+                viewport_stack.push(grid_lines);
+            }
+            GridMode::CenterCrosshair => {
+                let crosshair = container(
+                    stack![
+                        // Center horizontal line
+                        column![
+                            Space::new().height(Fill),
+                            container(Space::new().width(Fill).height(Length::Fixed(1.0)))
+                                .style(|_| container::Style {
+                                    background: Some(Background::Color(Color::from_rgba(1.0, 1.0, 1.0, 0.28))),
+                                    ..Default::default()
+                                }),
+                            Space::new().height(Fill),
+                        ]
+                        .width(Fill)
+                        .height(Fill),
+                        // Center vertical line
+                        row![
+                            Space::new().width(Fill),
+                            container(Space::new().width(Length::Fixed(1.0)).height(Fill))
+                                .style(|_| container::Style {
+                                    background: Some(Background::Color(Color::from_rgba(1.0, 1.0, 1.0, 0.28))),
+                                    ..Default::default()
+                                }),
+                            Space::new().width(Fill),
+                        ]
+                        .width(Fill)
+                        .height(Fill),
+                    ]
+                    .width(Fill)
+                    .height(Fill),
+                )
+                .center(Fill)
+                .into();
+
+                viewport_stack.push(crosshair);
+            }
+        }
+
+        // 2b. Freeze-to-Live Micro Loading Overlay
+        if self.is_loading_camera {
+            let loader = container(
+                container(
+                    row![
+                        render_svg(icons::ICON_SPINNER, 16.0, true, false),
+                        text("Connecting camera...").size(12).color(theme::COLOR_TEXT),
+                    ]
+                    .spacing(8)
+                    .align_y(Alignment::Center),
+                )
+                .padding([8, 16])
+                .style(theme::tooltip_style),
+            )
+            .center(Fill)
+            .into();
+
+            viewport_stack.push(loader);
+        }
+
+        // 2c. Snapshot Toast Notification
+        if let Some((ref filename, _)) = self.snapshot_toast {
+            let toast = container(
+                container(
+                    row![
+                        render_svg(icons::ICON_CAMERA, 14.0, true, false),
+                        text(format!("Snapshot saved to {}", filename))
+                            .size(11)
+                            .color(theme::COLOR_TEXT),
+                    ]
+                    .spacing(8)
+                    .align_y(Alignment::Center),
+                )
+                .padding([6, 12])
+                .style(theme::tooltip_style),
+            )
+            .align_x(Alignment::Center)
+            .padding([12, 0])
+            .into();
+
+            viewport_stack.push(toast);
+        }
+
+        // 2d. Settings Modal
         if self.show_settings {
             let settings_modal = container(
                 container(self.view_settings_panel())
                     .style(theme::settings_dialog_style)
-                    .width(Length::Fixed(440.0)),
+                    .width(Length::Fixed(460.0)),
             )
             .center(Fill)
             .into();
@@ -498,7 +816,7 @@ impl AutoCamApp {
         // 3. Bottom Controls Toolbar: Icon-only buttons with hover tooltips
         let toolbar = container(
             row![
-                // Mirror / Flip Icon Button
+                // Mirror / Flip
                 render_icon_btn(
                     icons::ICON_FLIP,
                     "Mirror / Flip [F]",
@@ -507,7 +825,7 @@ impl AutoCamApp {
                     false,
                     tooltip::Position::Top,
                 ),
-                // Freeze Frame Icon Button
+                // Freeze Frame
                 render_icon_btn(
                     if self.is_frozen {
                         icons::ICON_PLAY
@@ -566,6 +884,50 @@ impl AutoCamApp {
                 ]
                 .spacing(3)
                 .align_y(Alignment::Center),
+                // Auto Focus Quick Toggle
+                render_icon_btn(
+                    icons::ICON_FOCUS,
+                    if self.auto_focus {
+                        "Auto Focus: ON [A]"
+                    } else {
+                        "Auto Focus: OFF [A]"
+                    },
+                    Message::ToggleAutoFocus,
+                    self.auto_focus,
+                    false,
+                    tooltip::Position::Top,
+                ),
+                // Auto EV Quick Toggle
+                render_icon_btn(
+                    icons::ICON_EV,
+                    if self.auto_ev {
+                        "Auto EV: ON [E]"
+                    } else {
+                        "Auto EV: OFF [E]"
+                    },
+                    Message::ToggleAutoEv,
+                    self.auto_ev,
+                    false,
+                    tooltip::Position::Top,
+                ),
+                // Grid Alignment Overlay
+                render_icon_btn(
+                    icons::ICON_GRID,
+                    self.grid_mode.label(),
+                    Message::CycleGridMode,
+                    self.grid_mode != GridMode::Off,
+                    false,
+                    tooltip::Position::Top,
+                ),
+                // Snapshot Still Capture
+                render_icon_btn(
+                    icons::ICON_CAMERA,
+                    "Take Snapshot [C]",
+                    Message::CaptureSnapshot,
+                    false,
+                    false,
+                    tooltip::Position::Top,
+                ),
                 // Fullscreen Icon Button
                 render_icon_btn(
                     if self.is_fullscreen {
@@ -584,11 +946,7 @@ impl AutoCamApp {
                     tooltip::Position::Top,
                 ),
                 Space::new().width(Fill),
-                // Status message
-                text(&self.status_text)
-                    .size(11)
-                    .color(theme::COLOR_TEXT_MUTED),
-                // Bottom-right Settings Gear Icon Button
+                // Bottom-right Settings Gear Icon Button (Zero clutter, no text)
                 render_icon_btn(
                     icons::ICON_SETTINGS,
                     "Settings [S]",
@@ -598,7 +956,7 @@ impl AutoCamApp {
                     tooltip::Position::Top,
                 ),
             ]
-            .spacing(8)
+            .spacing(6)
             .align_y(Alignment::Center)
             .padding([5, 10]),
         )
@@ -616,15 +974,17 @@ impl AutoCamApp {
             .into()
     }
 
-    /// Settings modal panel
+    /// Settings Modal View: Complete Camera Engine & Hardware Driver Controls
     fn view_settings_panel(&self) -> Element<'_, Message> {
         let header = row![
             render_svg(icons::ICON_SETTINGS, 16.0, true, false),
-            text("Settings").size(14).color(theme::COLOR_TEXT),
+            text("Camera Engine & Settings")
+                .size(13)
+                .color(theme::COLOR_TEXT),
             Space::new().width(Fill),
             render_icon_btn(
                 icons::ICON_CLOSE,
-                "Close Settings [Esc]",
+                "Close Settings",
                 Message::ToggleSettings,
                 false,
                 true,
@@ -640,6 +1000,7 @@ impl AutoCamApp {
                 self.selected_device.clone(),
                 Message::DeviceSelected,
             )
+            .style(theme::pick_list_style)
             .text_size(12)
             .padding([4, 8])
             .width(Fill),
@@ -668,6 +1029,72 @@ impl AutoCamApp {
         ]
         .spacing(4);
 
+        // Hardware & Software Camera Tuning
+        let tuning_section = column![
+            text("Software Driver & DSP Tuning")
+                .size(11)
+                .color(theme::COLOR_TEXT_MUTED),
+            container(
+                column![
+                    // Focus Peaking
+                    row![
+                        render_svg(icons::ICON_PEAKING, 14.0, self.focus_peaking, false),
+                        text("Focus Peaking (Highlight in-focus PCB traces)")
+                            .size(11)
+                            .color(theme::COLOR_TEXT),
+                        Space::new().width(Fill),
+                        button(text(if self.focus_peaking { "Active" } else { "Off" }).size(10))
+                            .on_press(Message::ToggleFocusPeaking)
+                            .style(theme::clean_button_style(self.focus_peaking, false))
+                            .padding([2, 8]),
+                    ]
+                    .align_y(Alignment::Center),
+                    // EV Bias Slider
+                    row![
+                        text("EV Bias:").size(11).color(theme::COLOR_TEXT),
+                        text(format!("{:.1} EV", self.ev_bias))
+                            .size(11)
+                            .color(theme::COLOR_TEXT_MUTED),
+                        Space::new().width(Fill),
+                        slider(-20..=20, (self.ev_bias * 10.0) as i32, |val| {
+                            Message::SetEvBias(val as f32 / 10.0)
+                        })
+                        .width(Length::Fixed(140.0)),
+                    ]
+                    .align_y(Alignment::Center),
+                    // Brightness Slider
+                    row![
+                        text("Brightness:").size(11).color(theme::COLOR_TEXT),
+                        text(format!("{}", self.brightness))
+                            .size(11)
+                            .color(theme::COLOR_TEXT_MUTED),
+                        Space::new().width(Fill),
+                        slider(-50..=50, self.brightness, Message::SetBrightness)
+                            .width(Length::Fixed(140.0)),
+                    ]
+                    .align_y(Alignment::Center),
+                    // Contrast Slider
+                    row![
+                        text("Contrast:").size(11).color(theme::COLOR_TEXT),
+                        text(format!("{:.1}x", self.contrast))
+                            .size(11)
+                            .color(theme::COLOR_TEXT_MUTED),
+                        Space::new().width(Fill),
+                        slider(5..=20, (self.contrast * 10.0) as i32, |val| {
+                            Message::SetContrast(val as f32 / 10.0)
+                        })
+                        .width(Length::Fixed(140.0)),
+                    ]
+                    .align_y(Alignment::Center),
+                ]
+                .spacing(8),
+            )
+            .padding(10)
+            .style(theme::settings_inner_box_style)
+            .width(Fill),
+        ]
+        .spacing(4);
+
         let shortcuts_guide = column![
             text("Shortcuts").size(11).color(theme::COLOR_TEXT_MUTED),
             container(
@@ -675,6 +1102,10 @@ impl AutoCamApp {
                     shortcut_row("Space", "Freeze / Resume live feed"),
                     shortcut_row("F", "Mirror / Flip camera"),
                     shortcut_row("R", "Rotate 90 degrees"),
+                    shortcut_row("G", "Cycle Grid (Off -> 3x3 -> Crosshair)"),
+                    shortcut_row("A", "Toggle Auto Focus"),
+                    shortcut_row("E", "Toggle Auto EV (Exposure)"),
+                    shortcut_row("C", "Capture high-res snapshot to captures/"),
                     shortcut_row("P", "Toggle Picture-in-Picture"),
                     shortcut_row("F11", "Toggle Fullscreen"),
                     shortcut_row("+ / -", "Zoom in / Zoom out"),
@@ -699,6 +1130,7 @@ impl AutoCamApp {
             Space::new().height(Length::Fixed(6.0)),
             dev_section,
             res_section,
+            tuning_section,
             shortcuts_guide,
             Space::new().height(Length::Fixed(4.0)),
             footer,
@@ -728,13 +1160,12 @@ impl AutoCamApp {
 
         let mut layers: Vec<Element<'_, Message>> = vec![video_content];
 
-        // Floating header appears on hover without displacing video feed
         if self.pip_hovered {
-            let overlay_header: Element<'_, Message> = mouse_area(
+            let overlay_header = mouse_area(
                 container(
                     row![
                         pip_logo,
-                        text("AutoCam").size(11).color(theme::COLOR_TEXT_MUTED),
+                        text("AutoCam").size(11).color(theme::COLOR_TEXT),
                         Space::new().width(Fill),
                         render_icon_btn(
                             if self.is_frozen {
@@ -848,11 +1279,9 @@ fn render_icon_btn<'a>(
     on_press: Message,
     is_active: bool,
     is_danger: bool,
-    tooltip_pos: tooltip::Position,
+    position: tooltip::Position,
 ) -> Element<'a, Message> {
-    let icon_el = render_svg(svg_str, 15.0, is_active, is_danger);
-
-    let btn = button(icon_el)
+    let btn = button(render_svg(svg_str, 15.0, is_active, is_danger))
         .on_press(on_press)
         .style(theme::clean_button_style(is_active, is_danger))
         .padding([5, 7]);
@@ -862,40 +1291,51 @@ fn render_icon_btn<'a>(
         container(text(hint).size(11))
             .padding([3, 7])
             .style(theme::tooltip_style),
-        tooltip_pos,
+        position,
     )
     .into()
 }
 
-/// Wraps window content with non-blocking edge/corner resize zones for borderless window dragging
+/// Borderless Window Responsive Resize Handles
 fn with_resize_handles<'a>(content: Element<'a, Message>) -> Element<'a, Message> {
-    let edge_thickness = 6.0;
+    let border_thickness = 4.0;
     let corner_size = 20.0;
 
-    // Top edge (slim to keep titlebar drag smooth)
-    let top = mouse_area(Space::new().width(Fill).height(Length::Fixed(4.0)))
-        .interaction(mouse::Interaction::ResizingVertically)
-        .on_press(Message::ResizeWindow(window::Direction::North));
-
-    // Bottom edge
-    let bottom = container(
-        mouse_area(Space::new().width(Fill).height(Length::Fixed(edge_thickness)))
-            .interaction(mouse::Interaction::ResizingVertically)
-            .on_press(Message::ResizeWindow(window::Direction::South)),
+    // Top border
+    let top = mouse_area(
+        container(Space::new().width(Fill).height(Length::Fixed(border_thickness)))
+            .width(Fill),
     )
-    .align_bottom(Fill)
-    .width(Fill);
+    .interaction(mouse::Interaction::ResizingVertically)
+    .on_press(Message::ResizeWindow(window::Direction::North));
 
-    // Left edge
-    let left = mouse_area(Space::new().width(Length::Fixed(edge_thickness)).height(Fill))
-        .interaction(mouse::Interaction::ResizingHorizontally)
-        .on_press(Message::ResizeWindow(window::Direction::West));
+    // Bottom border
+    let bottom = container(
+        mouse_area(
+            container(Space::new().width(Fill).height(Length::Fixed(border_thickness)))
+                .width(Fill),
+        )
+        .interaction(mouse::Interaction::ResizingVertically)
+        .on_press(Message::ResizeWindow(window::Direction::South)),
+    )
+    .align_bottom(Fill);
 
-    // Right edge
+    // Left border
+    let left = mouse_area(
+        container(Space::new().width(Length::Fixed(border_thickness)).height(Fill))
+            .height(Fill),
+    )
+    .interaction(mouse::Interaction::ResizingHorizontally)
+    .on_press(Message::ResizeWindow(window::Direction::West));
+
+    // Right border
     let right = container(
-        mouse_area(Space::new().width(Length::Fixed(edge_thickness)).height(Fill))
-            .interaction(mouse::Interaction::ResizingHorizontally)
-            .on_press(Message::ResizeWindow(window::Direction::East)),
+        mouse_area(
+            container(Space::new().width(Length::Fixed(border_thickness)).height(Fill))
+                .height(Fill),
+        )
+        .interaction(mouse::Interaction::ResizingHorizontally)
+        .on_press(Message::ResizeWindow(window::Direction::East)),
     )
     .align_right(Fill)
     .height(Fill);
@@ -954,6 +1394,7 @@ fn main() -> iced::Result {
 
     iced::application(AutoCamApp::new, AutoCamApp::update, AutoCamApp::view)
         .subscription(AutoCamApp::subscription)
+        .theme(AutoCamApp::theme)
         .window(window::Settings {
             icon,
             decorations: false,

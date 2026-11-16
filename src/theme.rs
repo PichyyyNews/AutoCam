@@ -1,6 +1,7 @@
 use iced::border::Radius;
 use iced::widget::button;
 use iced::widget::container;
+use iced::widget::pick_list;
 use iced::{Background, Border, Color, Shadow, Theme};
 
 // Semantic Monochrome Tokens from clean-ui-design (Strict black & white / zinc)
@@ -135,6 +136,31 @@ pub fn settings_inner_box_style(_theme: &Theme) -> container::Style {
         },
         text_color: Some(COLOR_TEXT),
         ..Default::default()
+    }
+}
+
+pub fn pick_list_style(_theme: &Theme, status: pick_list::Status) -> pick_list::Style {
+    let (bg, border_color) = match status {
+        pick_list::Status::Hovered | pick_list::Status::Opened { .. } => (
+            Background::Color(COLOR_SURFACE_MUTED),
+            COLOR_BORDER_ACTIVE,
+        ),
+        _ => (
+            Background::Color(COLOR_SURFACE),
+            COLOR_BORDER,
+        ),
+    };
+
+    pick_list::Style {
+        text_color: COLOR_TEXT,
+        placeholder_color: COLOR_TEXT_MUTED,
+        handle_color: COLOR_TEXT,
+        background: bg,
+        border: Border {
+            color: border_color,
+            width: 1.0,
+            radius: RADIUS_SM,
+        },
     }
 }
 
