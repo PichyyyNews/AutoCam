@@ -1,0 +1,18 @@
+[package]
+name = "autocam"
+version = "0.0.1"
+edition = "2024"
+
+[dependencies]
+iced = "0.14.0"
+rusqlite = { version = "0.43.0", features = ["bundled"] }
+
+# ==============================================================================
+# Full Speed Release Profile: Maximum Runtime Performance & Minimal Binary Size
+# ==============================================================================
+[profile.release]
+opt-level = 3        # Aggressive optimizations
+lto = "fat"          # Link-Time Optimization across all crates
+codegen-units = 1    # Maximizes inlining & optimizations across compilation units
+panic = "abort"      # Disables stack unwinding for reduced overhead and size
+strip = true         # Strips all debug symbols
