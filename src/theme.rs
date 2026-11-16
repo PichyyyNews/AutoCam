@@ -243,3 +243,91 @@ pub fn clean_slider_style(_theme: &Theme, _status: slider::Status) -> slider::St
         },
     }
 }
+
+pub fn recording_button_style(_theme: &Theme, status: button::Status) -> button::Style {
+    let bg = match status {
+        button::Status::Hovered | button::Status::Pressed => {
+            Color::from_rgba(0.94, 0.27, 0.27, 0.28)
+        }
+        _ => Color::from_rgba(0.94, 0.27, 0.27, 0.16),
+    };
+
+    button::Style {
+        background: Some(Background::Color(bg)),
+        text_color: Color::from_rgb(0.94, 0.27, 0.27),
+        border: Border {
+            color: Color::from_rgba(0.94, 0.27, 0.27, 0.4),
+            width: 1.0,
+            radius: RADIUS_SM,
+        },
+        shadow: Shadow::default(),
+        ..Default::default()
+    }
+}
+
+pub fn album_expanded_style(_theme: &Theme, status: button::Status) -> button::Style {
+    let bg = match status {
+        button::Status::Hovered | button::Status::Pressed => COLOR_ACTIVE_BG,
+        _ => COLOR_SURFACE_MUTED,
+    };
+
+    button::Style {
+        background: Some(Background::Color(bg)),
+        text_color: COLOR_TEXT,
+        border: Border {
+            color: COLOR_BORDER_ACTIVE,
+            width: 1.0,
+            radius: RADIUS_SM,
+        },
+        shadow: Shadow::default(),
+        ..Default::default()
+    }
+}
+
+pub fn thumbnail_border_style(_theme: &Theme) -> container::Style {
+    container::Style {
+        background: Some(Background::Color(COLOR_BG)),
+        border: Border {
+            color: COLOR_BORDER,
+            width: 1.0,
+            radius: Radius {
+                top_left: 2.0,
+                top_right: 2.0,
+                bottom_right: 2.0,
+                bottom_left: 2.0,
+            },
+        },
+        ..Default::default()
+    }
+}
+
+pub fn media_tile_style(_theme: &Theme) -> container::Style {
+    container::Style {
+        background: Some(Background::Color(Color::from_rgb(0.06, 0.06, 0.07))),
+        border: Border {
+            color: Color::from_rgb(0.12, 0.12, 0.14),
+            width: 0.5,
+            radius: Radius::default(),
+        },
+        text_color: Some(COLOR_TEXT),
+        ..Default::default()
+    }
+}
+
+pub fn media_menu_style(_theme: &Theme) -> container::Style {
+    container::Style {
+        background: Some(Background::Color(Color::from_rgba(0.09, 0.09, 0.11, 0.98))),
+        border: Border {
+            color: COLOR_BORDER_ACTIVE,
+            width: 1.0,
+            radius: RADIUS_SM,
+        },
+        shadow: Shadow {
+            color: Color::from_rgba(0.0, 0.0, 0.0, 0.6),
+            offset: iced::Vector::new(0.0, 4.0),
+            blur_radius: 12.0,
+        },
+        text_color: Some(COLOR_TEXT),
+        ..Default::default()
+    }
+}

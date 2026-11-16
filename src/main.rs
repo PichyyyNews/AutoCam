@@ -1,8 +1,10 @@
 #![windows_subsystem = "windows"]
 
 mod camera;
+mod db;
 mod face_detect;
 mod icons;
+mod recorder;
 mod theme;
 
 use camera::{
@@ -21,6 +23,8 @@ use iced::{
     exit, Alignment, Background, Color, ContentFit, Element, Fill, Length, Subscription, Task,
     Theme,
 };
+use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const APP_ICON_BYTES: &[u8] = include_bytes!("../public/icon.png");
@@ -61,6 +65,7 @@ pub enum ShortcutAction {
     FaceHud,
     Interpolation,
     Snapshot,
+    Record,
     Pip,
     Fullscreen,
     Settings,
@@ -79,6 +84,7 @@ pub struct KeyBindings {
     pub face_hud: Key,
     pub interpolation: Key,
     pub snapshot: Key,
+    pub record: Key,
     pub pip: Key,
     pub fullscreen: Key,
     pub settings: Key,
@@ -98,6 +104,7 @@ impl Default for KeyBindings {
             face_hud: Key::Character("d".into()),
             interpolation: Key::Character("i".into()),
             snapshot: Key::Character("c".into()),
+            record: Key::Character("v".into()),
             pip: Key::Character("p".into()),
             fullscreen: Key::Named(key::Named::F11),
             settings: Key::Character("s".into()),
@@ -105,6 +112,29 @@ impl Default for KeyBindings {
             zoom_out: Key::Character("-".into()),
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MediaKind {
+    Photo,
+    Video,
+}
+
+#[derive(Debug, Clone)]
+pub struct MediaItem {
+    pub path: PathBuf,
+    pub filename: String,
+    pub kind: MediaKind,
+    pub modified: SystemTime,
+    pub size_bytes: u64,
+    pub thumbnail_handle: Option<image::Handle>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AlbumFilter {
+    All,
+    Photo,
+    Video,
 }
 
 fn key_matches(k1: &Key, k2: &Key) -> bool {
@@ -125,9 +155,78 @@ fn format_key(key: &Key) -> String {
     }
 }
 
+fn parse_key_str(s: &str) -> Option<Key> {
+    match s.to_lowercase().as_str() {
+        "space" => Some(Key::Named(key::Named::Space)),
+        "f11" => Some(Key::Named(key::Named::F11)),
+        "esc" | "escape" => Some(Key::Named(key::Named::Escape)),
+        c if c.len() == 1 => Some(Key::Character(c.into())),
+        _ => None,
+    }
+}
+
+fn format_size(bytes: u64) -> String {
+    if bytes >= 1024 * 1024 {
+        format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
+    } else if bytes >= 1024 {
+        format!("{:.0} KB", bytes as f64 / 1024.0)
+    } else {
+        format!("{} B", bytes)
+    }
+}
+
+fn scan_captures_folder() -> Vec<MediaItem> {
+    let mut items = Vec::new();
+    let captures_dir = PathBuf::from("captures");
+    if let Ok(entries) = std::fs::read_dir(&captures_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+            let is_photo = ext == "png" || ext == "jpg" || ext == "jpeg";
+            let is_video = ext == "avi" || ext == "mp4" || ext == "mkv" || ext == "mov";
+            if !is_photo && !is_video {
+                continue;
+            }
+            let filename = path.file_name().and_then(|f| f.to_str()).unwrap_or("").to_string();
+            let metadata = entry.metadata().ok();
+            let modified = metadata.as_ref().and_then(|m| m.modified().ok()).unwrap_or(SystemTime::UNIX_EPOCH);
+            let size_bytes = metadata.as_ref().map(|m| m.len()).unwrap_or(0);
+            
+            let kind = if is_photo {
+                MediaKind::Photo
+            } else {
+                MediaKind::Video
+            };
+
+            let thumbnail_handle = if is_photo {
+                std::fs::read(&path).ok().map(image::Handle::from_bytes)
+            } else {
+                None
+            };
+
+            items.push(MediaItem {
+                path,
+                filename,
+                kind,
+                modified,
+                size_bytes,
+                thumbnail_handle,
+            });
+        }
+    }
+    // Sort descending by modified date
+    items.sort_by(|a, b| b.modified.cmp(&a.modified));
+    items
+}
+
 pub struct AutoCamApp {
     main_window_id: Option<window::Id>,
     settings_window_id: Option<window::Id>,
+    album_window_id: Option<window::Id>,
+    viewer_window_id: Option<window::Id>,
 
     camera_manager: Option<CameraManager>,
     available_devices: Vec<CameraDeviceInfo>,
@@ -163,6 +262,25 @@ pub struct AutoCamApp {
     anti_flicker: AntiFlickerMode,
     latest_frame: Option<FramePayload>,
     snapshot_toast: Option<(String, Instant)>,
+
+    // Video Recording
+    video_recorder: Option<recorder::VideoRecorder>,
+    is_recording: bool,
+    recording_start_time: Option<Instant>,
+    recording_elapsed_secs: u64,
+
+    // Album & Media Gallery
+    media_items: Vec<MediaItem>,
+    latest_capture: Option<MediaItem>,
+    album_hovered: bool,
+    album_filter: AlbumFilter,
+    hovered_media_idx: Option<usize>,
+    active_media_menu_idx: Option<usize>,
+
+    // Photo Viewer Window
+    viewer_selected_path: Option<PathBuf>,
+    viewer_image_handle: Option<image::Handle>,
+    viewer_info_text: String,
 
     // Customizable Shortcuts
     keybindings: KeyBindings,
@@ -227,6 +345,29 @@ pub enum Message {
     OpenCapturesFolder,
     ResetDefaults,
 
+    // Video Recording
+    ToggleRecording,
+    RecordingTick,
+
+    // Album Window & Gallery Messages
+    OpenAlbumWindow,
+    CloseAlbumWindow,
+    AlbumWindowOpened(window::Id),
+    AlbumHovered(bool),
+    SetAlbumFilter(AlbumFilter),
+    RefreshAlbum,
+    MediaHovered(Option<usize>),
+    ToggleMediaMenu(Option<usize>),
+    OpenInExplorer(PathBuf),
+    CopyMedia(PathBuf),
+    CopyMediaPath(PathBuf),
+    DeleteMedia(PathBuf),
+
+    // Photo Viewer Window
+    OpenViewerWindow(PathBuf),
+    CloseViewerWindow,
+    ViewerWindowOpened(window::Id),
+
     // Shortcut Rebinding
     StartRebinding(ShortcutAction),
     CancelRebinding,
@@ -253,6 +394,9 @@ fn camera_frame_stream() -> impl iced::futures::Stream<Item = Message> {
 
 impl AutoCamApp {
     pub fn boot() -> (Self, Task<Message>) {
+        db::init();
+        let db_cfg = db::load_all();
+
         let (main_id, open_task) = window::open(window::Settings {
             icon: window::icon::from_file_data(APP_ICON_BYTES, None).ok(),
             decorations: false,
@@ -270,11 +414,84 @@ impl AutoCamApp {
         } else {
             vec![VideoResolution::Hd720p, VideoResolution::Fhd1080p]
         };
-        let resolution = VideoResolution::Hd720p;
+
+        // 1. Restore Persistent Database Config
+        let resolution = if let Some(res_str) = db_cfg.get("resolution") {
+            if res_str.contains("1080p") && supported_resolutions.contains(&VideoResolution::Fhd1080p) {
+                VideoResolution::Fhd1080p
+            } else {
+                VideoResolution::Hd720p
+            }
+        } else {
+            VideoResolution::Hd720p
+        };
+
+        let is_flip = db_cfg.get("is_flip").map(|v| v == "true").unwrap_or(true);
+        let rotation_deg = db_cfg.get("rotation_deg").and_then(|v| v.parse().ok()).unwrap_or(0);
+        let zoom_level = db_cfg.get("zoom_level").and_then(|v| v.parse().ok()).unwrap_or(1.0);
+        let action_shutter = db_cfg.get("action_shutter").map(|v| v == "true").unwrap_or(true);
+        let auto_focus = db_cfg.get("auto_focus").map(|v| v == "true").unwrap_or(true);
+        let manual_focus = db_cfg.get("manual_focus").and_then(|v| v.parse().ok()).unwrap_or(50);
+        let auto_ev = db_cfg.get("auto_ev").map(|v| v == "true").unwrap_or(false);
+        let ev_bias = db_cfg.get("ev_bias").and_then(|v| v.parse().ok()).unwrap_or(0.0);
+        let brightness = db_cfg.get("brightness").and_then(|v| v.parse().ok()).unwrap_or(0);
+        let contrast = db_cfg.get("contrast").and_then(|v| v.parse().ok()).unwrap_or(1.0);
+        let saturation = db_cfg.get("saturation").and_then(|v| v.parse().ok()).unwrap_or(1.0);
+        let focus_peaking = db_cfg.get("focus_peaking").map(|v| v == "true").unwrap_or(false);
+        let peaking_threshold = db_cfg.get("peaking_threshold").and_then(|v| v.parse().ok()).unwrap_or(55);
+        let cas_sharpen = db_cfg.get("cas_sharpen").map(|v| v == "true").unwrap_or(true);
+        let cas_intensity = db_cfg.get("cas_intensity").and_then(|v| v.parse().ok()).unwrap_or(0.45);
+        let frame_interpolation = db_cfg.get("frame_interpolation").map(|v| v == "true").unwrap_or(false);
+        let face_detection = db_cfg.get("face_detection").map(|v| v == "true").unwrap_or(false);
+        let anti_flicker = match db_cfg.get("anti_flicker").map(|s| s.as_str()) {
+            Some("60hz") => AntiFlickerMode::Hz60,
+            Some("off") => AntiFlickerMode::Off,
+            _ => AntiFlickerMode::Hz50,
+        };
+        let grid_mode = match db_cfg.get("grid_mode").map(|s| s.as_str()) {
+            Some("RuleOfThirds") => GridMode::RuleOfThirds,
+            Some("CenterCrosshair") => GridMode::CenterCrosshair,
+            _ => GridMode::Off,
+        };
+
+        // Restore custom shortcuts
+        let mut keybindings = KeyBindings::default();
+        if let Some(v) = db_cfg.get("shortcut_freeze").and_then(|s| parse_key_str(s)) { keybindings.freeze = v; }
+        if let Some(v) = db_cfg.get("shortcut_flip").and_then(|s| parse_key_str(s)) { keybindings.flip = v; }
+        if let Some(v) = db_cfg.get("shortcut_rotate").and_then(|s| parse_key_str(s)) { keybindings.rotate = v; }
+        if let Some(v) = db_cfg.get("shortcut_grid").and_then(|s| parse_key_str(s)) { keybindings.grid = v; }
+        if let Some(v) = db_cfg.get("shortcut_auto_focus").and_then(|s| parse_key_str(s)) { keybindings.auto_focus = v; }
+        if let Some(v) = db_cfg.get("shortcut_auto_ev").and_then(|s| parse_key_str(s)) { keybindings.auto_ev = v; }
+        if let Some(v) = db_cfg.get("shortcut_face_hud").and_then(|s| parse_key_str(s)) { keybindings.face_hud = v; }
+        if let Some(v) = db_cfg.get("shortcut_interpolation").and_then(|s| parse_key_str(s)) { keybindings.interpolation = v; }
+        if let Some(v) = db_cfg.get("shortcut_snapshot").and_then(|s| parse_key_str(s)) { keybindings.snapshot = v; }
+        if let Some(v) = db_cfg.get("shortcut_record").and_then(|s| parse_key_str(s)) { keybindings.record = v; }
+        if let Some(v) = db_cfg.get("shortcut_pip").and_then(|s| parse_key_str(s)) { keybindings.pip = v; }
+        if let Some(v) = db_cfg.get("shortcut_fullscreen").and_then(|s| parse_key_str(s)) { keybindings.fullscreen = v; }
+        if let Some(v) = db_cfg.get("shortcut_settings").and_then(|s| parse_key_str(s)) { keybindings.settings = v; }
+        if let Some(v) = db_cfg.get("shortcut_zoom_in").and_then(|s| parse_key_str(s)) { keybindings.zoom_in = v; }
+        if let Some(v) = db_cfg.get("shortcut_zoom_out").and_then(|s| parse_key_str(s)) { keybindings.zoom_out = v; }
 
         let camera_manager = if let Some(ref dev) = selected_device {
             let mgr = CameraManager::start(dev.index, resolution);
-            mgr.send(CameraControl::SetFlip(true));
+            mgr.send(CameraControl::SetFlip(is_flip));
+            mgr.send(CameraControl::SetRotate(rotation_deg));
+            mgr.send(CameraControl::SetZoom(zoom_level));
+            mgr.send(CameraControl::SetActionShutter(action_shutter));
+            mgr.send(CameraControl::SetAutoFocus(auto_focus));
+            mgr.send(CameraControl::SetManualFocus(manual_focus));
+            mgr.send(CameraControl::SetAutoEv(auto_ev));
+            mgr.send(CameraControl::SetEvBias(ev_bias));
+            mgr.send(CameraControl::SetBrightness(brightness));
+            mgr.send(CameraControl::SetContrast(contrast));
+            mgr.send(CameraControl::SetSaturation(saturation));
+            mgr.send(CameraControl::SetFocusPeaking(focus_peaking));
+            mgr.send(CameraControl::SetPeakingThreshold(peaking_threshold));
+            mgr.send(CameraControl::SetCasSharpen(cas_sharpen));
+            mgr.send(CameraControl::SetCasIntensity(cas_intensity));
+            mgr.send(CameraControl::SetFrameInterpolation(frame_interpolation));
+            mgr.send(CameraControl::SetFaceDetection(face_detection));
+            mgr.send(CameraControl::SetAntiFlicker(anti_flicker));
             Some(mgr)
         } else {
             None
@@ -286,44 +503,69 @@ impl AutoCamApp {
             "No camera detected".to_string()
         };
 
+        let media_items = scan_captures_folder();
+        let latest_capture = media_items.first().cloned();
+
         let app = Self {
             main_window_id: Some(main_id),
             settings_window_id: None,
+            album_window_id: None,
+            viewer_window_id: None,
+
             camera_manager,
             available_devices: devices,
             selected_device,
             supported_resolutions,
             resolution,
-            is_flip: true,
+            is_flip,
             is_frozen: false,
             is_fullscreen: false,
-            rotation_deg: 0,
-            zoom_level: 1.0,
+            rotation_deg,
+            zoom_level,
             image_handle: None,
             app_icon_handle: image::Handle::from_bytes(APP_ICON_BYTES),
             status_text,
 
-            grid_mode: GridMode::Off,
+            grid_mode,
             is_loading_camera: false,
-            action_shutter: true,
-            auto_focus: true,
-            manual_focus: 50,
-            auto_ev: false,
-            ev_bias: 0.0,
-            brightness: 0,
-            contrast: 1.0,
-            saturation: 1.0,
-            focus_peaking: false,
-            peaking_threshold: 55,
-            cas_sharpen: true,
-            cas_intensity: 0.45,
-            frame_interpolation: false,
-            face_detection: false,
-            anti_flicker: AntiFlickerMode::Hz50,
+            action_shutter,
+            auto_focus,
+            manual_focus,
+            auto_ev,
+            ev_bias,
+            brightness,
+            contrast,
+            saturation,
+            focus_peaking,
+            peaking_threshold,
+            cas_sharpen,
+            cas_intensity,
+            frame_interpolation,
+            face_detection,
+            anti_flicker,
             latest_frame: None,
             snapshot_toast: None,
 
-            keybindings: KeyBindings::default(),
+            // Video Recording
+            video_recorder: None,
+            is_recording: false,
+            recording_start_time: None,
+            recording_elapsed_secs: 0,
+
+            // Album
+            media_items,
+            latest_capture,
+            album_hovered: false,
+            album_filter: AlbumFilter::All,
+            hovered_media_idx: None,
+            active_media_menu_idx: None,
+
+            // Photo Viewer
+            viewer_selected_path: None,
+            viewer_image_handle: None,
+            viewer_info_text: String::new(),
+
+            keybindings,
             rebinding_action: None,
 
             is_pip: false,
@@ -337,12 +579,18 @@ impl AutoCamApp {
         let hotplug_sub = iced::time::every(Duration::from_millis(1500)).map(|_| Message::PollDevices);
         let frame_sub = Subscription::run(camera_frame_stream);
         let keyboard_sub = keyboard::listen().map(Message::KeyboardEvent);
+        let timer_sub = iced::time::every(Duration::from_secs(1)).map(|_| Message::RecordingTick);
 
-        Subscription::batch(vec![hotplug_sub, frame_sub, keyboard_sub])
+        Subscription::batch(vec![hotplug_sub, frame_sub, keyboard_sub, timer_sub])
     }
 
     pub fn theme(&self, _window_id: window::Id) -> iced::Theme {
         iced::Theme::Dark
+    }
+
+    pub fn refresh_media_items(&mut self) {
+        self.media_items = scan_captures_folder();
+        self.latest_capture = self.media_items.first().cloned();
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
@@ -354,6 +602,16 @@ impl AutoCamApp {
 
             Message::SettingsWindowOpened(id) => {
                 self.settings_window_id = Some(id);
+                Task::none()
+            }
+
+            Message::AlbumWindowOpened(id) => {
+                self.album_window_id = Some(id);
+                Task::none()
+            }
+
+            Message::ViewerWindowOpened(id) => {
+                self.viewer_window_id = Some(id);
                 Task::none()
             }
 
@@ -384,7 +642,150 @@ impl AutoCamApp {
                 }
             }
 
+            Message::OpenAlbumWindow => {
+                self.refresh_media_items();
+                if let Some(id) = self.album_window_id {
+                    window::gain_focus(id)
+                } else {
+                    let (id, task) = window::open(window::Settings {
+                        icon: window::icon::from_file_data(APP_ICON_BYTES, None).ok(),
+                        decorations: false,
+                        transparent: false,
+                        size: iced::Size::new(880.0, 620.0),
+                        min_size: Some(iced::Size::new(540.0, 420.0)),
+                        resizable: true,
+                        ..Default::default()
+                    });
+                    self.album_window_id = Some(id);
+                    task.map(Message::AlbumWindowOpened)
+                }
+            }
+
+            Message::CloseAlbumWindow => {
+                self.active_media_menu_idx = None;
+                self.hovered_media_idx = None;
+                if let Some(id) = self.album_window_id.take() {
+                    window::close(id)
+                } else {
+                    Task::none()
+                }
+            }
+
+            Message::AlbumHovered(h) => {
+                self.album_hovered = h;
+                Task::none()
+            }
+
+            Message::SetAlbumFilter(f) => {
+                self.album_filter = f;
+                self.active_media_menu_idx = None;
+                Task::none()
+            }
+
+            Message::RefreshAlbum => {
+                self.refresh_media_items();
+                Task::none()
+            }
+
+            Message::MediaHovered(idx) => {
+                self.hovered_media_idx = idx;
+                Task::none()
+            }
+
+            Message::ToggleMediaMenu(idx) => {
+                if self.active_media_menu_idx == idx {
+                    self.active_media_menu_idx = None;
+                } else {
+                    self.active_media_menu_idx = idx;
+                }
+                Task::none()
+            }
+
+            Message::OpenInExplorer(path) => {
+                let _ = std::process::Command::new("explorer")
+                    .arg(format!("/select,{}", path.display()))
+                    .spawn();
+                self.active_media_menu_idx = None;
+                Task::none()
+            }
+
+            Message::CopyMediaPath(path) => {
+                let path_str = path.to_string_lossy().to_string();
+                self.active_media_menu_idx = None;
+                self.snapshot_toast = Some(("Path copied to clipboard".to_string(), Instant::now()));
+                iced::clipboard::write(path_str)
+            }
+
+            Message::CopyMedia(path) => {
+                let path_str = path.to_string_lossy().to_string();
+                self.active_media_menu_idx = None;
+                let _ = std::process::Command::new("powershell")
+                    .args(["-NoProfile", "-Command", &format!("Set-Clipboard -Path '{}'", path_str.replace('\'', "''"))])
+                    .spawn();
+                self.snapshot_toast = Some(("Media copied to clipboard".to_string(), Instant::now()));
+                Task::perform(
+                    tokio::time::sleep(Duration::from_secs(2)),
+                    |_| Message::ClearSnapshotToast,
+                )
+            }
+
+            Message::DeleteMedia(path) => {
+                let _ = std::fs::remove_file(&path);
+                self.active_media_menu_idx = None;
+                self.refresh_media_items();
+                self.snapshot_toast = Some(("Deleted media file".to_string(), Instant::now()));
+                Task::perform(
+                    tokio::time::sleep(Duration::from_secs(2)),
+                    |_| Message::ClearSnapshotToast,
+                )
+            }
+
+            Message::OpenViewerWindow(path) => {
+                self.active_media_menu_idx = None;
+                if let Ok(bytes) = std::fs::read(&path) {
+                    if let Ok(img) = ::image::load_from_memory(&bytes) {
+                        let w = img.width();
+                        let h = img.height();
+                        let size_bytes = bytes.len() as u64;
+                        let fname = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+                        self.viewer_info_text = format!("{} • {}x{} • {}", fname, w, h, format_size(size_bytes));
+                        self.viewer_image_handle = Some(image::Handle::from_bytes(bytes));
+                        self.viewer_selected_path = Some(path);
+
+                        if let Some(id) = self.viewer_window_id {
+                            return window::gain_focus(id);
+                        } else {
+                            let (id, task) = window::open(window::Settings {
+                                icon: window::icon::from_file_data(APP_ICON_BYTES, None).ok(),
+                                decorations: false,
+                                transparent: false,
+                                size: iced::Size::new(960.0, 640.0),
+                                min_size: Some(iced::Size::new(480.0, 360.0)),
+                                resizable: true,
+                                ..Default::default()
+                            });
+                            self.viewer_window_id = Some(id);
+                            return task.map(Message::ViewerWindowOpened);
+                        }
+                    }
+                }
+                Task::none()
+            }
+
+            Message::CloseViewerWindow => {
+                self.viewer_image_handle = None;
+                self.viewer_selected_path = None;
+                if let Some(id) = self.viewer_window_id.take() {
+                    window::close(id)
+                } else {
+                    Task::none()
+                }
+            }
+
             Message::CloseApp => {
+                if let Some(rec) = self.video_recorder.take() {
+                    let _ = rec.stop();
+                }
                 exit()
             }
 
@@ -401,7 +802,65 @@ impl AutoCamApp {
                     frame.height,
                     frame.rgba.clone(),
                 ));
+
+                // If recording, feed frame to background video recorder
+                if self.is_recording {
+                    if let Some(ref rec) = self.video_recorder {
+                        rec.append_frame(Arc::new(frame.rgba.clone()));
+                    }
+                }
+
                 self.latest_frame = Some(frame);
+                Task::none()
+            }
+
+            Message::RecordingTick => {
+                if self.is_recording {
+                    if let Some(start) = self.recording_start_time {
+                        self.recording_elapsed_secs = start.elapsed().as_secs();
+                    }
+                }
+                Task::none()
+            }
+
+            Message::ToggleRecording => {
+                if !self.is_recording {
+                    let _ = std::fs::create_dir_all("captures");
+                    let timestamp = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0);
+                    let path = PathBuf::from(format!("captures/autocam_rec_{}.avi", timestamp));
+                    let (w, h) = if let Some(ref frame) = self.latest_frame {
+                        (frame.width, frame.height)
+                    } else {
+                        (1280, 720)
+                    };
+
+                    match recorder::VideoRecorder::start(w, h, 30, path.clone()) {
+                        Ok(rec) => {
+                            self.video_recorder = Some(rec);
+                            self.is_recording = true;
+                            self.recording_start_time = Some(Instant::now());
+                            self.recording_elapsed_secs = 0;
+                            self.snapshot_toast = Some(("Recording started...".to_string(), Instant::now()));
+                        }
+                        Err(e) => {
+                            self.snapshot_toast = Some((format!("Record error: {}", e), Instant::now()));
+                        }
+                    }
+                } else {
+                    self.is_recording = false;
+                    self.recording_start_time = None;
+                    if let Some(rec) = self.video_recorder.take() {
+                        let saved = rec.stop();
+                        if let Some(p) = saved {
+                            let name = p.file_name().unwrap_or_default().to_string_lossy().to_string();
+                            self.snapshot_toast = Some((format!("Video saved to {}", name), Instant::now()));
+                        }
+                    }
+                    self.refresh_media_items();
+                }
                 Task::none()
             }
 
@@ -410,104 +869,106 @@ impl AutoCamApp {
                 Task::none()
             }
 
-            Message::PollDevices => Task::perform(
-                async { CameraManager::query_available_devices() },
-                Message::DevicesPolled,
-            ),
+            Message::PollDevices => {
+                Task::perform(
+                    async { CameraManager::query_available_devices() },
+                    Message::DevicesPolled,
+                )
+            }
 
-            Message::DevicesPolled(new_devices) => {
-                if new_devices != self.available_devices {
-                    let was_empty =
-                        self.selected_device.is_none() || self.available_devices.is_empty();
-                    self.available_devices = new_devices.clone();
+            Message::DevicesPolled(devices) => {
+                let diff = devices.len() != self.available_devices.len()
+                    || devices
+                        .iter()
+                        .zip(&self.available_devices)
+                        .any(|(a, b)| a.index != b.index);
 
-                    if was_empty {
-                        if let Some(first_dev) = self.available_devices.first().cloned() {
-                            self.status_text = format!("Connected: {}", first_dev.name);
-                            return self.update(Message::DeviceSelected(first_dev));
-                        }
-                    } else if let Some(ref current) = self.selected_device {
-                        let still_exists =
-                            self.available_devices.iter().any(|d| d.name == current.name);
-                        if !still_exists {
-                            if let Some(next_dev) = self.available_devices.first().cloned() {
-                                self.status_text = format!("Connected: {}", next_dev.name);
-                                return self.update(Message::DeviceSelected(next_dev));
-                            } else {
-                                self.selected_device = None;
-                                self.camera_manager = None;
-                                self.image_handle = None;
-                                self.status_text = "Camera disconnected".to_string();
-                            }
-                        }
+                if diff {
+                    self.available_devices = devices;
+                    if self.selected_device.is_none() && !self.available_devices.is_empty() {
+                        let dev = self.available_devices[0].clone();
+                        return self.update(Message::DeviceSelected(dev));
                     }
                 }
                 Task::none()
             }
 
-            Message::KeyboardEvent(event) => {
-                if let keyboard::Event::KeyPressed { key, .. } = event {
-                    // 1. If currently recording a custom shortcut:
-                    if let Some(action) = self.rebinding_action.take() {
-                        if key == Key::Named(key::Named::Escape) {
-                            return Task::none();
-                        }
-                        match action {
-                            ShortcutAction::Freeze => self.keybindings.freeze = key,
-                            ShortcutAction::Flip => self.keybindings.flip = key,
-                            ShortcutAction::Rotate => self.keybindings.rotate = key,
-                            ShortcutAction::Grid => self.keybindings.grid = key,
-                            ShortcutAction::AutoFocus => self.keybindings.auto_focus = key,
-                            ShortcutAction::AutoEv => self.keybindings.auto_ev = key,
-                            ShortcutAction::FaceHud => self.keybindings.face_hud = key,
-                            ShortcutAction::Interpolation => self.keybindings.interpolation = key,
-                            ShortcutAction::Snapshot => self.keybindings.snapshot = key,
-                            ShortcutAction::Pip => self.keybindings.pip = key,
-                            ShortcutAction::Fullscreen => self.keybindings.fullscreen = key,
-                            ShortcutAction::Settings => self.keybindings.settings = key,
-                            ShortcutAction::ZoomIn => self.keybindings.zoom_in = key,
-                            ShortcutAction::ZoomOut => self.keybindings.zoom_out = key,
-                        }
+            Message::KeyboardEvent(keyboard::Event::KeyPressed { key, .. }) => {
+                if let Some(action) = self.rebinding_action {
+                    if matches!(key, Key::Named(key::Named::Escape)) {
+                        self.rebinding_action = None;
                         return Task::none();
                     }
-
-                    // 2. Normal key action dispatching:
-                    if key == Key::Named(key::Named::Escape) {
-                        if self.settings_window_id.is_some() {
-                            return self.update(Message::CloseSettingsWindow);
-                        }
-                    } else if key_matches(&key, &self.keybindings.freeze) {
-                        return self.update(Message::ToggleFreeze);
-                    } else if key_matches(&key, &self.keybindings.flip) {
-                        return self.update(Message::ToggleFlip);
-                    } else if key_matches(&key, &self.keybindings.rotate) {
-                        return self.update(Message::RotateNext);
-                    } else if key_matches(&key, &self.keybindings.grid) {
-                        return self.update(Message::CycleGridMode);
-                    } else if key_matches(&key, &self.keybindings.auto_focus) {
-                        return self.update(Message::ToggleAutoFocus);
-                    } else if key_matches(&key, &self.keybindings.auto_ev) {
-                        return self.update(Message::ToggleAutoEv);
-                    } else if key_matches(&key, &self.keybindings.face_hud) {
-                        return self.update(Message::ToggleFaceDetection);
-                    } else if key_matches(&key, &self.keybindings.interpolation) {
-                        return self.update(Message::ToggleFrameInterpolation);
-                    } else if key_matches(&key, &self.keybindings.snapshot) {
-                        return self.update(Message::CaptureSnapshot);
-                    } else if key_matches(&key, &self.keybindings.pip) {
-                        return self.update(Message::TogglePip);
-                    } else if key_matches(&key, &self.keybindings.fullscreen) {
-                        return self.update(Message::ToggleFullscreen);
-                    } else if key_matches(&key, &self.keybindings.settings) {
-                        return self.update(Message::ToggleSettings);
-                    } else if key_matches(&key, &self.keybindings.zoom_in) {
-                        return self.update(Message::ZoomIn);
-                    } else if key_matches(&key, &self.keybindings.zoom_out) {
-                        return self.update(Message::ZoomOut);
+                    let key_str = format_key(&key);
+                    match action {
+                        ShortcutAction::Freeze => { self.keybindings.freeze = key; db::set("shortcut_freeze", &key_str); }
+                        ShortcutAction::Flip => { self.keybindings.flip = key; db::set("shortcut_flip", &key_str); }
+                        ShortcutAction::Rotate => { self.keybindings.rotate = key; db::set("shortcut_rotate", &key_str); }
+                        ShortcutAction::Grid => { self.keybindings.grid = key; db::set("shortcut_grid", &key_str); }
+                        ShortcutAction::AutoFocus => { self.keybindings.auto_focus = key; db::set("shortcut_auto_focus", &key_str); }
+                        ShortcutAction::AutoEv => { self.keybindings.auto_ev = key; db::set("shortcut_auto_ev", &key_str); }
+                        ShortcutAction::FaceHud => { self.keybindings.face_hud = key; db::set("shortcut_face_hud", &key_str); }
+                        ShortcutAction::Interpolation => { self.keybindings.interpolation = key; db::set("shortcut_interpolation", &key_str); }
+                        ShortcutAction::Snapshot => { self.keybindings.snapshot = key; db::set("shortcut_snapshot", &key_str); }
+                        ShortcutAction::Record => { self.keybindings.record = key; db::set("shortcut_record", &key_str); }
+                        ShortcutAction::Pip => { self.keybindings.pip = key; db::set("shortcut_pip", &key_str); }
+                        ShortcutAction::Fullscreen => { self.keybindings.fullscreen = key; db::set("shortcut_fullscreen", &key_str); }
+                        ShortcutAction::Settings => { self.keybindings.settings = key; db::set("shortcut_settings", &key_str); }
+                        ShortcutAction::ZoomIn => { self.keybindings.zoom_in = key; db::set("shortcut_zoom_in", &key_str); }
+                        ShortcutAction::ZoomOut => { self.keybindings.zoom_out = key; db::set("shortcut_zoom_out", &key_str); }
                     }
+                    self.rebinding_action = None;
+                    return Task::none();
+                }
+
+                if matches!(key, Key::Named(key::Named::Escape)) {
+                    if self.viewer_window_id.is_some() {
+                        return self.update(Message::CloseViewerWindow);
+                    }
+                    if self.album_window_id.is_some() {
+                        return self.update(Message::CloseAlbumWindow);
+                    }
+                    if self.settings_window_id.is_some() {
+                        return self.update(Message::CloseSettingsWindow);
+                    }
+                    if self.is_fullscreen {
+                        return self.update(Message::ToggleFullscreen);
+                    }
+                } else if key_matches(&key, &self.keybindings.freeze) {
+                    return self.update(Message::ToggleFreeze);
+                } else if key_matches(&key, &self.keybindings.flip) {
+                    return self.update(Message::ToggleFlip);
+                } else if key_matches(&key, &self.keybindings.rotate) {
+                    return self.update(Message::RotateNext);
+                } else if key_matches(&key, &self.keybindings.grid) {
+                    return self.update(Message::CycleGridMode);
+                } else if key_matches(&key, &self.keybindings.auto_focus) {
+                    return self.update(Message::ToggleAutoFocus);
+                } else if key_matches(&key, &self.keybindings.auto_ev) {
+                    return self.update(Message::ToggleAutoEv);
+                } else if key_matches(&key, &self.keybindings.face_hud) {
+                    return self.update(Message::ToggleFaceDetection);
+                } else if key_matches(&key, &self.keybindings.interpolation) {
+                    return self.update(Message::ToggleFrameInterpolation);
+                } else if key_matches(&key, &self.keybindings.snapshot) {
+                    return self.update(Message::CaptureSnapshot);
+                } else if key_matches(&key, &self.keybindings.record) {
+                    return self.update(Message::ToggleRecording);
+                } else if key_matches(&key, &self.keybindings.pip) {
+                    return self.update(Message::TogglePip);
+                } else if key_matches(&key, &self.keybindings.fullscreen) {
+                    return self.update(Message::ToggleFullscreen);
+                } else if key_matches(&key, &self.keybindings.settings) {
+                    return self.update(Message::ToggleSettings);
+                } else if key_matches(&key, &self.keybindings.zoom_in) {
+                    return self.update(Message::ZoomIn);
+                } else if key_matches(&key, &self.keybindings.zoom_out) {
+                    return self.update(Message::ZoomOut);
                 }
                 Task::none()
             }
+
+            Message::KeyboardEvent(_) => Task::none(),
 
             Message::StartRebinding(action) => {
                 self.rebinding_action = Some(action);
@@ -522,32 +983,48 @@ impl AutoCamApp {
             Message::ResetShortcuts => {
                 self.keybindings = KeyBindings::default();
                 self.rebinding_action = None;
+                db::set("shortcut_freeze", "Space");
+                db::set("shortcut_flip", "F");
+                db::set("shortcut_rotate", "R");
+                db::set("shortcut_grid", "G");
+                db::set("shortcut_auto_focus", "A");
+                db::set("shortcut_auto_ev", "E");
+                db::set("shortcut_face_hud", "D");
+                db::set("shortcut_interpolation", "I");
+                db::set("shortcut_snapshot", "C");
+                db::set("shortcut_record", "V");
+                db::set("shortcut_pip", "P");
+                db::set("shortcut_fullscreen", "F11");
+                db::set("shortcut_settings", "S");
+                db::set("shortcut_zoom_in", "=");
+                db::set("shortcut_zoom_out", "-");
                 Task::none()
             }
 
             Message::DeviceSelected(dev) => {
-                if let Some(ref current) = self.selected_device {
-                    if current.index == dev.index && self.camera_manager.is_some() {
-                        return Task::none();
-                    }
-                }
                 self.selected_device = Some(dev.clone());
-                self.status_text = format!("Connected: {}", dev.name);
                 self.is_loading_camera = true;
+                self.status_text = format!("Connecting: {}", dev.name);
 
                 self.supported_resolutions = CameraManager::query_supported_resolutions(dev.index);
                 if !self.supported_resolutions.contains(&self.resolution) {
-                    self.resolution = VideoResolution::Hd720p;
+                    self.resolution = self
+                        .supported_resolutions
+                        .first()
+                        .copied()
+                        .unwrap_or(VideoResolution::Hd720p);
                 }
 
                 if let Some(ref mgr) = self.camera_manager {
                     mgr.send(CameraControl::SwitchDevice(dev.index));
-                    mgr.send(CameraControl::SwitchResolution(self.resolution));
                 } else {
                     let mgr = CameraManager::start(dev.index, self.resolution);
                     mgr.send(CameraControl::SetFlip(self.is_flip));
                     mgr.send(CameraControl::SetRotate(self.rotation_deg));
                     mgr.send(CameraControl::SetZoom(self.zoom_level));
+                    mgr.send(CameraControl::SetActionShutter(self.action_shutter));
+                    mgr.send(CameraControl::SetAutoFocus(self.auto_focus));
+                    mgr.send(CameraControl::SetManualFocus(self.manual_focus));
                     mgr.send(CameraControl::SetAutoEv(self.auto_ev));
                     mgr.send(CameraControl::SetEvBias(self.ev_bias));
                     mgr.send(CameraControl::SetBrightness(self.brightness));
@@ -559,27 +1036,33 @@ impl AutoCamApp {
                     mgr.send(CameraControl::SetCasIntensity(self.cas_intensity));
                     mgr.send(CameraControl::SetFrameInterpolation(self.frame_interpolation));
                     mgr.send(CameraControl::SetFaceDetection(self.face_detection));
+                    mgr.send(CameraControl::SetAntiFlicker(self.anti_flicker));
                     self.camera_manager = Some(mgr);
                 }
+
+                db::set("device_index", &dev.index.to_string());
                 Task::none()
             }
 
             Message::ToggleResolution => {
                 let next_res = match self.resolution {
-                    VideoResolution::Hd720p => VideoResolution::Fhd1080p,
+                    VideoResolution::Hd720p => {
+                        if self.supported_resolutions.contains(&VideoResolution::Fhd1080p) {
+                            VideoResolution::Fhd1080p
+                        } else {
+                            VideoResolution::Hd720p
+                        }
+                    }
                     VideoResolution::Fhd1080p => VideoResolution::Hd720p,
                 };
-                if self.supported_resolutions.contains(&next_res) {
-                    self.update(Message::SetResolution(next_res))
-                } else {
-                    Task::none()
-                }
+                self.update(Message::SetResolution(next_res))
             }
 
             Message::SetResolution(res) => {
-                if self.supported_resolutions.contains(&res) && res != self.resolution {
+                if self.resolution != res {
                     self.resolution = res;
                     self.is_loading_camera = true;
+                    db::set("resolution", res.label());
                     if let Some(ref mgr) = self.camera_manager {
                         mgr.send(CameraControl::SwitchResolution(res));
                     }
@@ -587,40 +1070,9 @@ impl AutoCamApp {
                 Task::none()
             }
 
-            Message::ToggleCasSharpen => {
-                self.cas_sharpen = !self.cas_sharpen;
-                if let Some(ref mgr) = self.camera_manager {
-                    mgr.send(CameraControl::SetCasSharpen(self.cas_sharpen));
-                }
-                Task::none()
-            }
-
-            Message::SetCasIntensity(val) => {
-                self.cas_intensity = val;
-                if let Some(ref mgr) = self.camera_manager {
-                    mgr.send(CameraControl::SetCasIntensity(val));
-                }
-                Task::none()
-            }
-
-            Message::ToggleFrameInterpolation => {
-                self.frame_interpolation = !self.frame_interpolation;
-                if let Some(ref mgr) = self.camera_manager {
-                    mgr.send(CameraControl::SetFrameInterpolation(self.frame_interpolation));
-                }
-                Task::none()
-            }
-
-            Message::ToggleFaceDetection => {
-                self.face_detection = !self.face_detection;
-                if let Some(ref mgr) = self.camera_manager {
-                    mgr.send(CameraControl::SetFaceDetection(self.face_detection));
-                }
-                Task::none()
-            }
-
             Message::ToggleFlip => {
                 self.is_flip = !self.is_flip;
+                db::set("is_flip", &self.is_flip.to_string());
                 if let Some(ref mgr) = self.camera_manager {
                     mgr.send(CameraControl::SetFlip(self.is_flip));
                 }
@@ -636,17 +1088,17 @@ impl AutoCamApp {
             }
 
             Message::RotateNext => {
-                let next_deg = match self.rotation_deg {
-                    0 => 90,
-                    90 => 180,
-                    180 => 270,
-                    _ => 0,
-                };
-                self.update(Message::SetRotation(next_deg))
+                self.rotation_deg = (self.rotation_deg + 90) % 360;
+                db::set("rotation_deg", &self.rotation_deg.to_string());
+                if let Some(ref mgr) = self.camera_manager {
+                    mgr.send(CameraControl::SetRotate(self.rotation_deg));
+                }
+                Task::none()
             }
 
             Message::SetRotation(deg) => {
-                self.rotation_deg = deg;
+                self.rotation_deg = deg % 360;
+                db::set("rotation_deg", &self.rotation_deg.to_string());
                 if let Some(ref mgr) = self.camera_manager {
                     mgr.send(CameraControl::SetRotate(self.rotation_deg));
                 }
@@ -654,35 +1106,47 @@ impl AutoCamApp {
             }
 
             Message::ZoomIn => {
-                let new_zoom = (self.zoom_level + 0.25).min(3.0);
-                self.update(Message::SetZoom(new_zoom))
+                let next = (self.zoom_level + 0.25).min(4.0);
+                self.update(Message::SetZoom(next))
             }
 
             Message::ZoomOut => {
-                let new_zoom = (self.zoom_level - 0.25).max(1.0);
-                self.update(Message::SetZoom(new_zoom))
+                let next = (self.zoom_level - 0.25).max(1.0);
+                self.update(Message::SetZoom(next))
             }
 
-            Message::SetZoom(val) => {
-                self.zoom_level = val;
+            Message::SetZoom(level) => {
+                self.zoom_level = level.clamp(1.0, 4.0);
+                db::set("zoom_level", &format!("{:.2}", self.zoom_level));
                 if let Some(ref mgr) = self.camera_manager {
-                    mgr.send(CameraControl::SetZoom(val));
+                    mgr.send(CameraControl::SetZoom(self.zoom_level));
                 }
                 Task::none()
             }
 
             Message::CycleGridMode => {
                 self.grid_mode = self.grid_mode.next();
+                db::set("grid_mode", match self.grid_mode {
+                    GridMode::RuleOfThirds => "RuleOfThirds",
+                    GridMode::CenterCrosshair => "CenterCrosshair",
+                    GridMode::Off => "Off",
+                });
                 Task::none()
             }
 
             Message::SetGridMode(mode) => {
                 self.grid_mode = mode;
+                db::set("grid_mode", match self.grid_mode {
+                    GridMode::RuleOfThirds => "RuleOfThirds",
+                    GridMode::CenterCrosshair => "CenterCrosshair",
+                    GridMode::Off => "Off",
+                });
                 Task::none()
             }
 
             Message::ToggleActionShutter => {
                 self.action_shutter = !self.action_shutter;
+                db::set("action_shutter", &self.action_shutter.to_string());
                 if let Some(ref mgr) = self.camera_manager {
                     mgr.send(CameraControl::SetActionShutter(self.action_shutter));
                 }
@@ -691,6 +1155,7 @@ impl AutoCamApp {
 
             Message::ToggleAutoFocus => {
                 self.auto_focus = !self.auto_focus;
+                db::set("auto_focus", &self.auto_focus.to_string());
                 if let Some(ref mgr) = self.camera_manager {
                     mgr.send(CameraControl::SetAutoFocus(self.auto_focus));
                 }
@@ -699,7 +1164,7 @@ impl AutoCamApp {
 
             Message::SetManualFocus(val) => {
                 self.manual_focus = val;
-                self.auto_focus = false;
+                db::set("manual_focus", &val.to_string());
                 if let Some(ref mgr) = self.camera_manager {
                     mgr.send(CameraControl::SetManualFocus(val));
                 }
@@ -708,6 +1173,7 @@ impl AutoCamApp {
 
             Message::ToggleAutoEv => {
                 self.auto_ev = !self.auto_ev;
+                db::set("auto_ev", &self.auto_ev.to_string());
                 if let Some(ref mgr) = self.camera_manager {
                     mgr.send(CameraControl::SetAutoEv(self.auto_ev));
                 }
@@ -716,6 +1182,7 @@ impl AutoCamApp {
 
             Message::SetEvBias(val) => {
                 self.ev_bias = val;
+                db::set("ev_bias", &format!("{:.2}", val));
                 if let Some(ref mgr) = self.camera_manager {
                     mgr.send(CameraControl::SetEvBias(val));
                 }
@@ -724,6 +1191,7 @@ impl AutoCamApp {
 
             Message::SetBrightness(val) => {
                 self.brightness = val;
+                db::set("brightness", &val.to_string());
                 if let Some(ref mgr) = self.camera_manager {
                     mgr.send(CameraControl::SetBrightness(val));
                 }
@@ -732,6 +1200,7 @@ impl AutoCamApp {
 
             Message::SetContrast(val) => {
                 self.contrast = val;
+                db::set("contrast", &format!("{:.2}", val));
                 if let Some(ref mgr) = self.camera_manager {
                     mgr.send(CameraControl::SetContrast(val));
                 }
@@ -740,6 +1209,7 @@ impl AutoCamApp {
 
             Message::SetSaturation(val) => {
                 self.saturation = val;
+                db::set("saturation", &format!("{:.2}", val));
                 if let Some(ref mgr) = self.camera_manager {
                     mgr.send(CameraControl::SetSaturation(val));
                 }
@@ -748,6 +1218,7 @@ impl AutoCamApp {
 
             Message::ToggleFocusPeaking => {
                 self.focus_peaking = !self.focus_peaking;
+                db::set("focus_peaking", &self.focus_peaking.to_string());
                 if let Some(ref mgr) = self.camera_manager {
                     mgr.send(CameraControl::SetFocusPeaking(self.focus_peaking));
                 }
@@ -756,14 +1227,56 @@ impl AutoCamApp {
 
             Message::SetPeakingThreshold(val) => {
                 self.peaking_threshold = val;
+                db::set("peaking_threshold", &val.to_string());
                 if let Some(ref mgr) = self.camera_manager {
                     mgr.send(CameraControl::SetPeakingThreshold(val));
                 }
                 Task::none()
             }
 
+            Message::ToggleCasSharpen => {
+                self.cas_sharpen = !self.cas_sharpen;
+                db::set("cas_sharpen", &self.cas_sharpen.to_string());
+                if let Some(ref mgr) = self.camera_manager {
+                    mgr.send(CameraControl::SetCasSharpen(self.cas_sharpen));
+                }
+                Task::none()
+            }
+
+            Message::SetCasIntensity(val) => {
+                self.cas_intensity = val;
+                db::set("cas_intensity", &format!("{:.2}", val));
+                if let Some(ref mgr) = self.camera_manager {
+                    mgr.send(CameraControl::SetCasIntensity(val));
+                }
+                Task::none()
+            }
+
+            Message::ToggleFrameInterpolation => {
+                self.frame_interpolation = !self.frame_interpolation;
+                db::set("frame_interpolation", &self.frame_interpolation.to_string());
+                if let Some(ref mgr) = self.camera_manager {
+                    mgr.send(CameraControl::SetFrameInterpolation(self.frame_interpolation));
+                }
+                Task::none()
+            }
+
+            Message::ToggleFaceDetection => {
+                self.face_detection = !self.face_detection;
+                db::set("face_detection", &self.face_detection.to_string());
+                if let Some(ref mgr) = self.camera_manager {
+                    mgr.send(CameraControl::SetFaceDetection(self.face_detection));
+                }
+                Task::none()
+            }
+
             Message::SetAntiFlicker(mode) => {
                 self.anti_flicker = mode;
+                db::set("anti_flicker", match mode {
+                    AntiFlickerMode::Hz50 => "50hz",
+                    AntiFlickerMode::Hz60 => "60hz",
+                    AntiFlickerMode::Off => "off",
+                });
                 if let Some(ref mgr) = self.camera_manager {
                     mgr.send(CameraControl::SetAntiFlicker(mode));
                 }
@@ -789,6 +1302,7 @@ impl AutoCamApp {
                     .is_ok()
                     {
                         self.snapshot_toast = Some((filename, Instant::now()));
+                        self.refresh_media_items();
                         return Task::perform(
                             tokio::time::sleep(Duration::from_secs(3)),
                             |_| Message::ClearSnapshotToast,
@@ -820,6 +1334,23 @@ impl AutoCamApp {
                 self.face_detection = false;
                 self.action_shutter = true;
                 self.anti_flicker = AntiFlickerMode::Hz50;
+
+                db::set("ev_bias", "0.0");
+                db::set("brightness", "0");
+                db::set("contrast", "1.0");
+                db::set("saturation", "1.0");
+                db::set("zoom_level", "1.0");
+                db::set("is_flip", "true");
+                db::set("rotation_deg", "0");
+                db::set("focus_peaking", "false");
+                db::set("peaking_threshold", "55");
+                db::set("cas_sharpen", "true");
+                db::set("cas_intensity", "0.45");
+                db::set("frame_interpolation", "false");
+                db::set("face_detection", "false");
+                db::set("action_shutter", "true");
+                db::set("anti_flicker", "50hz");
+
                 if let Some(ref mgr) = self.camera_manager {
                     mgr.send(CameraControl::ResetDefaults);
                 }
@@ -884,6 +1415,10 @@ impl AutoCamApp {
     pub fn view(&self, window_id: window::Id) -> Element<'_, Message> {
         if Some(window_id) == self.settings_window_id {
             self.view_settings_window(window_id)
+        } else if Some(window_id) == self.album_window_id {
+            self.view_album_window(window_id)
+        } else if Some(window_id) == self.viewer_window_id {
+            self.view_viewer_window(window_id)
         } else if self.is_pip {
             self.view_pip(window_id)
         } else {
@@ -902,71 +1437,50 @@ impl AutoCamApp {
             container(
                 row![
                     app_logo,
-                    text("AutoCam").size(13).color(theme::COLOR_TEXT),
-                    Space::new().width(Length::Fixed(10.0)),
-                    // Quick camera device selector
+                    text("AutoCam")
+                        .size(13)
+                        .color(theme::COLOR_TEXT),
+                    Space::new().width(Length::Fixed(12.0)),
                     pick_list(
                         self.available_devices.clone(),
                         self.selected_device.clone(),
                         Message::DeviceSelected,
                     )
                     .style(theme::pick_list_style)
-                    .text_size(12)
+                    .text_size(11)
                     .padding([3, 8]),
                     // Resolution Toggle Button
-                    if self.supported_resolutions.contains(&VideoResolution::Fhd1080p) {
-                        tooltip(
-                            button(text(self.resolution.label()).size(11))
-                                .on_press(Message::ToggleResolution)
-                                .style(theme::clean_button_style(false, false))
-                                .padding([4, 8]),
-                            container(text("Toggle 720p / 1080p").size(11))
-                                .padding([3, 7])
-                                .style(theme::tooltip_style),
-                            tooltip::Position::Bottom,
-                        )
-                    } else {
-                        tooltip(
-                            button(text("720p (Max)").size(11))
-                                .style(theme::disabled_button_style)
-                                .padding([4, 8]),
-                            container(text("1080p unsupported by current camera").size(11))
-                                .padding([3, 7])
-                                .style(theme::tooltip_style),
-                            tooltip::Position::Bottom,
-                        )
-                    },
-                    // Refresh Device Button
+                    button(text(self.resolution.label()).size(11))
+                        .on_press(Message::ToggleResolution)
+                        .style(theme::clean_button_style(false, false))
+                        .padding([3, 8]),
+                    // Hardware Refresh Button
                     render_icon_btn(
                         icons::ICON_REFRESH,
-                        "Refresh Devices",
+                        "Scan and Refresh Video Devices",
                         Message::RefreshDevices,
                         false,
                         false,
                         tooltip::Position::Bottom,
                     ),
                     Space::new().width(Fill),
-                    // PiP Switcher Button
+                    // PiP Switcher
                     render_icon_btn(
                         icons::ICON_PIP,
-                        "Picture in Picture [P]",
+                        "Picture-in-Picture [P]",
                         Message::TogglePip,
                         self.is_pip,
                         false,
                         tooltip::Position::Bottom,
                     ),
-                    // Fullscreen Button
+                    // Fullscreen
                     render_icon_btn(
                         if self.is_fullscreen {
                             icons::ICON_MINIMIZE_2
                         } else {
                             icons::ICON_MAXIMIZE
                         },
-                        if self.is_fullscreen {
-                            "Exit Fullscreen [F11]"
-                        } else {
-                            "Fullscreen [F11]"
-                        },
+                        "Fullscreen [F11]",
                         Message::ToggleFullscreen,
                         self.is_fullscreen,
                         false,
@@ -1138,7 +1652,7 @@ impl AutoCamApp {
                 container(
                     row![
                         render_svg(icons::ICON_CAMERA, 14.0, true, false),
-                        text(format!("Snapshot saved to {}", filename))
+                        text(filename.as_str())
                             .size(11)
                             .color(theme::COLOR_TEXT),
                     ]
@@ -1161,9 +1675,121 @@ impl AutoCamApp {
             .height(Fill);
 
         // 3. Bottom Controls Toolbar
+        // 3.1 Bottom-Left Record Video Button
+        let record_btn: Element<'_, Message> = if self.is_recording {
+            let mins = self.recording_elapsed_secs / 60;
+            let secs = self.recording_elapsed_secs % 60;
+            let time_str = format!("REC {:02}:{:02}", mins, secs);
+
+            tooltip(
+                button(
+                    row![
+                        render_svg(icons::ICON_RECORDING_STOP, 14.0, true, true),
+                        text(time_str).size(11).color(Color::from_rgb(0.94, 0.27, 0.27)),
+                    ]
+                    .spacing(5)
+                    .align_y(Alignment::Center),
+                )
+                .on_press(Message::ToggleRecording)
+                .style(theme::recording_button_style)
+                .padding([4, 8]),
+                container(text("Stop Video Recording [V]").size(11))
+                    .padding([3, 7])
+                    .style(theme::tooltip_style),
+                tooltip::Position::Top,
+            )
+            .into()
+        } else {
+            render_icon_btn(
+                icons::ICON_RECORD,
+                "Start Video Recording [V]",
+                Message::ToggleRecording,
+                false,
+                true,
+                tooltip::Position::Top,
+            )
+        };
+
+        // 3.2 Bottom-Right Album Button with Hover Preview Expansion
+        let album_btn: Element<'_, Message> = if self.album_hovered {
+            let thumb: Element<'_, Message> = if let Some(ref item) = self.latest_capture {
+                if let Some(ref handle) = item.thumbnail_handle {
+                    container(
+                        image(handle)
+                            .content_fit(ContentFit::Cover)
+                            .width(Length::Fixed(22.0))
+                            .height(Length::Fixed(22.0)),
+                    )
+                    .style(theme::thumbnail_border_style)
+                    .into()
+                } else if item.kind == MediaKind::Video {
+                    container(render_svg(icons::ICON_VIDEO, 16.0, true, false))
+                        .padding([2, 4])
+                        .into()
+                } else {
+                    render_svg(icons::ICON_ALBUM, 16.0, true, false)
+                }
+            } else {
+                render_svg(icons::ICON_ALBUM, 16.0, true, false)
+            };
+
+            // Expanded preview pill
+            mouse_area(
+                button(
+                    row![
+                        thumb,
+                        column![
+                            text(if self.latest_capture.is_some() { "Latest Capture" } else { "Album" })
+                                .size(9)
+                                .color(theme::COLOR_TEXT_MUTED),
+                            text(if let Some(ref item) = self.latest_capture {
+                                if item.filename.len() > 14 {
+                                    format!("{}...", &item.filename[..11])
+                                } else {
+                                    item.filename.clone()
+                                }
+                            } else {
+                                "Gallery Empty".to_string()
+                            })
+                            .size(10)
+                            .color(theme::COLOR_TEXT),
+                        ]
+                        .spacing(1),
+                    ]
+                    .spacing(6)
+                    .align_y(Alignment::Center),
+                )
+                .on_press(Message::OpenAlbumWindow)
+                .style(theme::album_expanded_style)
+                .padding([3, 8]),
+            )
+            .on_enter(Message::AlbumHovered(true))
+            .on_exit(Message::AlbumHovered(false))
+            .into()
+        } else {
+            // Normal icon button
+            mouse_area(
+                tooltip(
+                    button(render_svg(icons::ICON_ALBUM, 15.0, false, false))
+                        .on_press(Message::OpenAlbumWindow)
+                        .style(theme::clean_button_style(false, false))
+                        .padding([5, 7]),
+                    container(text("Open Album / Gallery").size(11))
+                        .padding([3, 7])
+                        .style(theme::tooltip_style),
+                    tooltip::Position::Top,
+                ),
+            )
+            .on_enter(Message::AlbumHovered(true))
+            .on_exit(Message::AlbumHovered(false))
+            .into()
+        };
+
         let toolbar = container(
             row![
-                // Mirror / Flip
+                // 1. Record Video Button (Bottom-Left)
+                record_btn,
+                // 2. Mirror / Flip
                 render_icon_btn(
                     icons::ICON_FLIP,
                     "Mirror / Flip [F]",
@@ -1172,7 +1798,7 @@ impl AutoCamApp {
                     false,
                     tooltip::Position::Top,
                 ),
-                // Freeze / Play
+                // 3. Freeze / Play
                 render_icon_btn(
                     if self.is_frozen {
                         icons::ICON_PLAY
@@ -1189,7 +1815,7 @@ impl AutoCamApp {
                     false,
                     tooltip::Position::Top,
                 ),
-                // Rotate Icon Button with Angle Badge
+                // 4. Rotate Icon Button with Angle Badge
                 tooltip(
                     button(
                         row![
@@ -1207,7 +1833,7 @@ impl AutoCamApp {
                         .style(theme::tooltip_style),
                     tooltip::Position::Top,
                 ),
-                // Zoom Controls
+                // 5. Zoom Controls
                 row![
                     render_icon_btn(
                         icons::ICON_ZOOM_OUT,
@@ -1231,7 +1857,7 @@ impl AutoCamApp {
                 ]
                 .spacing(3)
                 .align_y(Alignment::Center),
-                // Auto Focus Quick Toggle
+                // 6. Auto Focus Quick Toggle
                 render_icon_btn(
                     icons::ICON_FOCUS,
                     if self.auto_focus {
@@ -1244,7 +1870,7 @@ impl AutoCamApp {
                     false,
                     tooltip::Position::Top,
                 ),
-                // Auto EV Quick Toggle
+                // 7. Auto EV Quick Toggle
                 render_icon_btn(
                     icons::ICON_EV,
                     if self.auto_ev {
@@ -1257,7 +1883,7 @@ impl AutoCamApp {
                     false,
                     tooltip::Position::Top,
                 ),
-                // Grid Alignment Overlay
+                // 8. Grid Alignment Overlay
                 render_icon_btn(
                     icons::ICON_GRID,
                     self.grid_mode.label(),
@@ -1266,7 +1892,7 @@ impl AutoCamApp {
                     false,
                     tooltip::Position::Top,
                 ),
-                // Snapshot Still Capture
+                // 9. Snapshot Still Capture
                 render_icon_btn(
                     icons::ICON_CAMERA,
                     "Take Snapshot [C]",
@@ -1275,7 +1901,7 @@ impl AutoCamApp {
                     false,
                     tooltip::Position::Top,
                 ),
-                // Presenter Face Tracking HUD
+                // 10. Presenter Face Tracking HUD
                 render_icon_btn(
                     icons::ICON_FACE,
                     if self.face_detection {
@@ -1288,7 +1914,7 @@ impl AutoCamApp {
                     false,
                     tooltip::Position::Top,
                 ),
-                // Fullscreen Icon Button
+                // 11. Fullscreen Icon Button
                 render_icon_btn(
                     if self.is_fullscreen {
                         icons::ICON_MINIMIZE_2
@@ -1306,7 +1932,9 @@ impl AutoCamApp {
                     tooltip::Position::Top,
                 ),
                 Space::new().width(Fill),
-                // Bottom-right Settings Window Opener Button
+                // 12. Bottom-right Album Preview & Window Opener
+                album_btn,
+                // 13. Settings Window Opener Button
                 render_icon_btn(
                     icons::ICON_SETTINGS,
                     "Camera Engine & Driver Settings [S]",
@@ -1324,6 +1952,413 @@ impl AutoCamApp {
         .width(Fill);
 
         let content = column![title_bar, video_viewport, toolbar,]
+            .width(Fill)
+            .height(Fill);
+
+        let root = container(content)
+            .style(theme::root_window_style)
+            .width(Fill)
+            .height(Fill)
+            .into();
+
+        with_resize_handles(root, window_id)
+    }
+
+    /// ALBUM / GALLERY WINDOW VIEW:
+    /// Responsive tabs: All, Photo, Video
+    /// Edge-to-edge seamless grid with zero margin, zero padding
+    /// Hover revealed 3-dots button with Open in explorer, Copy, Copy path, Delete
+    fn view_album_window(&self, window_id: window::Id) -> Element<'_, Message> {
+        let photo_count = self.media_items.iter().filter(|i| i.kind == MediaKind::Photo).count();
+        let video_count = self.media_items.iter().filter(|i| i.kind == MediaKind::Video).count();
+        let all_count = self.media_items.len();
+
+        let header = mouse_area(
+            container(
+                row![
+                    render_svg(icons::ICON_ALBUM, 16.0, true, false),
+                    text("AutoCam Media Album")
+                        .size(13)
+                        .color(theme::COLOR_TEXT),
+                    Space::new().width(Fill),
+                    render_icon_btn(
+                        icons::ICON_FOLDER,
+                        "Open Captures Folder in Explorer",
+                        Message::OpenCapturesFolder,
+                        false,
+                        false,
+                        tooltip::Position::Bottom,
+                    ),
+                    render_icon_btn(
+                        icons::ICON_REFRESH,
+                        "Refresh Album",
+                        Message::RefreshAlbum,
+                        false,
+                        false,
+                        tooltip::Position::Bottom,
+                    ),
+                    render_icon_btn(
+                        icons::ICON_MINUS,
+                        "Minimize",
+                        Message::MinimizeWindow(window_id),
+                        false,
+                        false,
+                        tooltip::Position::Bottom,
+                    ),
+                    render_icon_btn(
+                        icons::ICON_CLOSE,
+                        "Close Album [Esc]",
+                        Message::CloseAlbumWindow,
+                        false,
+                        true,
+                        tooltip::Position::Bottom,
+                    ),
+                ]
+                .spacing(8)
+                .align_y(Alignment::Center)
+                .padding([6, 12]),
+            )
+            .style(theme::title_bar_style)
+            .width(Fill),
+        )
+        .on_press(Message::DragWindow(window_id));
+
+        // Tab Filter Bar
+        let tabs = container(
+            row![
+                button(text(format!("All ({})", all_count)).size(11))
+                    .on_press(Message::SetAlbumFilter(AlbumFilter::All))
+                    .style(theme::clean_button_style(self.album_filter == AlbumFilter::All, false))
+                    .padding([4, 12]),
+                button(text(format!("Photo ({})", photo_count)).size(11))
+                    .on_press(Message::SetAlbumFilter(AlbumFilter::Photo))
+                    .style(theme::clean_button_style(self.album_filter == AlbumFilter::Photo, false))
+                    .padding([4, 12]),
+                button(text(format!("Video ({})", video_count)).size(11))
+                    .on_press(Message::SetAlbumFilter(AlbumFilter::Video))
+                    .style(theme::clean_button_style(self.album_filter == AlbumFilter::Video, false))
+                    .padding([4, 12]),
+            ]
+            .spacing(4)
+            .align_y(Alignment::Center)
+            .padding([6, 12]),
+        )
+        .style(theme::controls_panel_style)
+        .width(Fill);
+
+        // Filter items
+        let filtered_items: Vec<(usize, &MediaItem)> = self
+            .media_items
+            .iter()
+            .enumerate()
+            .filter(|(_, item)| match self.album_filter {
+                AlbumFilter::All => true,
+                AlbumFilter::Photo => item.kind == MediaKind::Photo,
+                AlbumFilter::Video => item.kind == MediaKind::Video,
+            })
+            .collect();
+
+        let grid_content: Element<'_, Message> = if filtered_items.is_empty() {
+            container(
+                column![
+                    render_svg(icons::ICON_ALBUM, 40.0, false, false),
+                    Space::new().height(Length::Fixed(8.0)),
+                    text("No media found").size(13).color(theme::COLOR_TEXT),
+                    text("Take snapshots with [C] or record videos with [V]")
+                        .size(11)
+                        .color(theme::COLOR_TEXT_MUTED),
+                ]
+                .align_x(Alignment::Center)
+                .spacing(4),
+            )
+            .center(Fill)
+            .into()
+        } else {
+            // Strict NO MARGIN, NO PADDING Grid (4 items per row)
+            let items_per_row = 4;
+            let mut grid_col = column![].spacing(0).width(Fill);
+
+            for chunk in filtered_items.chunks(items_per_row) {
+                let mut row_tiles = row![].spacing(0).width(Fill);
+
+                for &(idx, item) in chunk {
+                    let is_hovered = self.hovered_media_idx == Some(idx);
+                    let is_menu_open = self.active_media_menu_idx == Some(idx);
+
+                    // Media visual content
+                    let preview_el: Element<'_, Message> = match item.kind {
+                        MediaKind::Photo => {
+                            if let Some(ref handle) = item.thumbnail_handle {
+                                image(handle)
+                                    .content_fit(ContentFit::Cover)
+                                    .width(Fill)
+                                    .height(Fill)
+                                    .into()
+                            } else {
+                                container(render_svg(icons::ICON_ALBUM, 24.0, false, false))
+                                    .center(Fill)
+                                    .into()
+                            }
+                        }
+                        MediaKind::Video => {
+                            container(
+                                column![
+                                    render_svg(icons::ICON_VIDEO, 28.0, true, false),
+                                    Space::new().height(Length::Fixed(4.0)),
+                                    text(format_size(item.size_bytes))
+                                        .size(10)
+                                        .color(theme::COLOR_TEXT_MUTED),
+                                ]
+                                .align_x(Alignment::Center),
+                            )
+                            .center(Fill)
+                            .into()
+                        }
+                    };
+
+                    let mut tile_stack = stack![preview_el].width(Fill).height(Fill);
+
+                    // Filename bottom bar overlay
+                    let bottom_bar: Element<'_, Message> = container(
+                        text(&item.filename)
+                            .size(10)
+                            .color(theme::COLOR_TEXT),
+                    )
+                    .style(|_: &Theme| container::Style {
+                        background: Some(Background::Color(Color::from_rgba(0.06, 0.06, 0.08, 0.75))),
+                        ..Default::default()
+                    })
+                    .padding([3, 6])
+                    .width(Fill)
+                    .into();
+
+                    tile_stack = tile_stack.push(
+                        column![Space::new().height(Fill), bottom_bar]
+                            .width(Fill)
+                            .height(Fill),
+                    );
+
+                    // 3-Dots Button in Top-Right
+                    if is_hovered || is_menu_open {
+                        let dots_btn: Element<'_, Message> = container(
+                            button(render_svg(icons::ICON_MORE_HORIZONTAL, 14.0, is_menu_open, false))
+                                .on_press(Message::ToggleMediaMenu(Some(idx)))
+                                .style(theme::clean_button_style(is_menu_open, false))
+                                .padding([4, 6]),
+                        )
+                        .padding([4, 4])
+                        .into();
+
+                        tile_stack = tile_stack.push(
+                            row![Space::new().width(Fill), dots_btn]
+                                .width(Fill)
+                                .height(Fill),
+                        );
+                    }
+
+                    // Context Menu Overlay when 3-dots is clicked
+                    if is_menu_open {
+                        let menu_overlay: Element<'_, Message> = container(
+                            column![
+                                button(
+                                    row![
+                                        render_svg(icons::ICON_FOLDER, 13.0, false, false),
+                                        text("เปิดใน explorer").size(11),
+                                    ]
+                                    .spacing(6)
+                                    .align_y(Alignment::Center),
+                                )
+                                .on_press(Message::OpenInExplorer(item.path.clone()))
+                                .style(theme::clean_button_style(false, false))
+                                .padding([4, 8])
+                                .width(Fill),
+
+                                button(
+                                    row![
+                                        render_svg(icons::ICON_COPY, 13.0, false, false),
+                                        text("copy").size(11),
+                                    ]
+                                    .spacing(6)
+                                    .align_y(Alignment::Center),
+                                )
+                                .on_press(Message::CopyMedia(item.path.clone()))
+                                .style(theme::clean_button_style(false, false))
+                                .padding([4, 8])
+                                .width(Fill),
+
+                                button(
+                                    row![
+                                        render_svg(icons::ICON_COPY, 13.0, false, false),
+                                        text("copy path").size(11),
+                                    ]
+                                    .spacing(6)
+                                    .align_y(Alignment::Center),
+                                )
+                                .on_press(Message::CopyMediaPath(item.path.clone()))
+                                .style(theme::clean_button_style(false, false))
+                                .padding([4, 8])
+                                .width(Fill),
+
+                                button(
+                                    row![
+                                        render_svg(icons::ICON_TRASH, 13.0, false, true),
+                                        text("delete").size(11),
+                                    ]
+                                    .spacing(6)
+                                    .align_y(Alignment::Center),
+                                )
+                                .on_press(Message::DeleteMedia(item.path.clone()))
+                                .style(theme::clean_button_style(false, true))
+                                .padding([4, 8])
+                                .width(Fill),
+                            ]
+                            .spacing(2)
+                            .padding([4, 4]),
+                        )
+                        .style(theme::media_menu_style)
+                        .width(Length::Fixed(150.0))
+                        .into();
+
+                        tile_stack = tile_stack.push(
+                            column![
+                                Space::new().height(Length::Fixed(28.0)),
+                                row![Space::new().width(Fill), menu_overlay].width(Fill),
+                            ]
+                            .width(Fill)
+                            .height(Fill),
+                        );
+                    }
+
+                    // Click image to open in Photo Viewer Window
+                    let click_target_path = item.path.clone();
+                    let tile_box = mouse_area(
+                        container(tile_stack)
+                            .style(theme::media_tile_style)
+                            .width(Fill)
+                            .height(Length::Fixed(150.0)),
+                    )
+                    .on_enter(Message::MediaHovered(Some(idx)))
+                    .on_exit(Message::MediaHovered(None))
+                    .on_press(Message::OpenViewerWindow(click_target_path));
+
+                    row_tiles = row_tiles.push(container(tile_box).width(Length::FillPortion(1)));
+                }
+
+                // Balance empty cells in row
+                let mut cell_count = chunk.len();
+                while cell_count < items_per_row {
+                    row_tiles = row_tiles.push(
+                        container(Space::new().width(Fill).height(Length::Fixed(150.0)))
+                            .style(theme::media_tile_style)
+                            .width(Length::FillPortion(1)),
+                    );
+                    cell_count += 1;
+                }
+
+                grid_col = grid_col.push(row_tiles);
+            }
+
+            scrollable(grid_col)
+                .width(Fill)
+                .height(Fill)
+                .into()
+        };
+
+        let content = column![header, tabs, grid_content]
+            .spacing(0)
+            .width(Fill)
+            .height(Fill);
+
+        let root = container(content)
+            .style(theme::root_window_style)
+            .width(Fill)
+            .height(Fill)
+            .into();
+
+        with_resize_handles(root, window_id)
+    }
+
+    /// PHOTO VIEWER WINDOW VIEW:
+    /// Dedicated window displaying full resolution captured photo with dark backdrop
+    fn view_viewer_window(&self, window_id: window::Id) -> Element<'_, Message> {
+        let header = mouse_area(
+            container(
+                row![
+                    render_svg(icons::ICON_CAMERA, 16.0, true, false),
+                    text(&self.viewer_info_text)
+                        .size(12)
+                        .color(theme::COLOR_TEXT),
+                    Space::new().width(Fill),
+                    if let Some(ref path) = self.viewer_selected_path {
+                        render_icon_btn(
+                            icons::ICON_FOLDER,
+                            "Show in Explorer",
+                            Message::OpenInExplorer(path.clone()),
+                            false,
+                            false,
+                            tooltip::Position::Bottom,
+                        )
+                    } else {
+                        Space::new().width(Length::Fixed(0.0)).into()
+                    },
+                    if let Some(ref path) = self.viewer_selected_path {
+                        render_icon_btn(
+                            icons::ICON_COPY,
+                            "Copy Image to Clipboard",
+                            Message::CopyMedia(path.clone()),
+                            false,
+                            false,
+                            tooltip::Position::Bottom,
+                        )
+                    } else {
+                        Space::new().width(Length::Fixed(0.0)).into()
+                    },
+                    render_icon_btn(
+                        icons::ICON_MINUS,
+                        "Minimize",
+                        Message::MinimizeWindow(window_id),
+                        false,
+                        false,
+                        tooltip::Position::Bottom,
+                    ),
+                    render_icon_btn(
+                        icons::ICON_CLOSE,
+                        "Close Viewer [Esc]",
+                        Message::CloseViewerWindow,
+                        false,
+                        true,
+                        tooltip::Position::Bottom,
+                    ),
+                ]
+                .spacing(8)
+                .align_y(Alignment::Center)
+                .padding([6, 12]),
+            )
+            .style(theme::title_bar_style)
+            .width(Fill),
+        )
+        .on_press(Message::DragWindow(window_id));
+
+        let image_viewport: Element<'_, Message> = if let Some(ref handle) = self.viewer_image_handle {
+            container(
+                image(handle)
+                    .content_fit(ContentFit::Contain)
+                    .width(Fill)
+                    .height(Fill),
+            )
+            .style(|_: &Theme| container::Style {
+                background: Some(Background::Color(Color::from_rgb(0.03, 0.03, 0.035))),
+                ..Default::default()
+            })
+            .center(Fill)
+            .into()
+        } else {
+            container(text("No image loaded").size(12).color(theme::COLOR_TEXT_MUTED))
+                .center(Fill)
+                .into()
+        };
+
+        let content = column![header, image_viewport]
             .width(Fill)
             .height(Fill);
 
@@ -1420,227 +2455,168 @@ impl AutoCamApp {
                     ]
                     .spacing(8)
                     .align_y(Alignment::Center),
-                    row![
-                        text("Telemetry: Real-Time Sub-20ms Engine • Direct Sensor Pipe")
-                            .size(10)
-                            .color(theme::COLOR_TEXT_MUTED),
-                    ],
                 ]
-                .spacing(8),
+                .spacing(10)
+                .padding([10, 14]),
             )
-            .padding(10)
             .style(theme::settings_inner_box_style)
             .width(Fill),
         ]
-        .spacing(4);
+        .spacing(6);
 
-        // SECTION 2: Shutter, Exposure & Anti-Flicker
-        let shutter_section = column![
-            text("2. Exposure, Shutter & Lighting Dynamics").size(11).color(theme::COLOR_TEXT_MUTED),
+        // SECTION 2: Low-Level Shutter & Anti-Flicker
+        let flicker_section = column![
+            text("2. Shutter Timing & Powerline Frequency").size(11).color(theme::COLOR_TEXT_MUTED),
             container(
                 column![
                     row![
-                        render_svg(icons::ICON_CAMERA, 14.0, self.action_shutter, false),
                         column![
-                            text("Anti-Ghosting (High-Speed Action Shutter)").size(11).color(theme::COLOR_TEXT),
-                            text("Prevents motion blur & ghost trails on rapid movement").size(10).color(theme::COLOR_TEXT_MUTED),
+                            text("High-Speed Shutter Sync:").size(11).color(theme::COLOR_TEXT),
+                            text("Minimizes motion blur on fast finger & hardware movement").size(10).color(theme::COLOR_TEXT_MUTED),
                         ],
                         Space::new().width(Fill),
-                        button(text(if self.action_shutter { "Active" } else { "Off" }).size(10))
+                        button(text(if self.action_shutter { "Active" } else { "Off" }).size(11))
                             .on_press(Message::ToggleActionShutter)
                             .style(theme::clean_button_style(self.action_shutter, false))
                             .padding([3, 10]),
                     ]
                     .align_y(Alignment::Center),
                     row![
-                        render_svg(icons::ICON_EV, 14.0, self.auto_ev, false),
                         column![
-                            text("Software Auto-EV (Adaptive Lighting)").size(11).color(theme::COLOR_TEXT),
-                            text("Smooth DSP exposure normalization with zero flicker").size(10).color(theme::COLOR_TEXT_MUTED),
+                            text("Anti-Flicker Filter:").size(11).color(theme::COLOR_TEXT),
+                            text("Neutralizes fluorescent/LED light pulsing").size(10).color(theme::COLOR_TEXT_MUTED),
                         ],
                         Space::new().width(Fill),
-                        button(text(if self.auto_ev { "Active" } else { "Off" }).size(10))
-                            .on_press(Message::ToggleAutoEv)
-                            .style(theme::clean_button_style(self.auto_ev, false))
-                            .padding([3, 10]),
-                    ]
-                    .align_y(Alignment::Center),
-                    row![
-                        text("EV Exposure Bias:").size(11).color(theme::COLOR_TEXT),
-                        text(format!("{:.1} EV", self.ev_bias))
-                            .size(11)
-                            .color(theme::COLOR_TEXT_MUTED),
-                        Space::new().width(Fill),
-                        slider(-20..=20, (self.ev_bias * 10.0) as i32, |val| {
-                            Message::SetEvBias(val as f32 / 10.0)
-                        })
-                        .style(theme::clean_slider_style)
-                        .width(Length::Fixed(160.0)),
-                    ]
-                    .align_y(Alignment::Center),
-                    row![
-                        text("Anti-Flicker Frequency:").size(11).color(theme::COLOR_TEXT),
-                        Space::new().width(Fill),
-                        button(text("50 Hz (TH/EU)").size(10))
+                        button(text("50 Hz (TH/EU)").size(11))
                             .on_press(Message::SetAntiFlicker(AntiFlickerMode::Hz50))
                             .style(theme::clean_button_style(self.anti_flicker == AntiFlickerMode::Hz50, false))
                             .padding([3, 8]),
-                        button(text("60 Hz (US)").size(10))
+                        button(text("60 Hz (US)").size(11))
                             .on_press(Message::SetAntiFlicker(AntiFlickerMode::Hz60))
                             .style(theme::clean_button_style(self.anti_flicker == AntiFlickerMode::Hz60, false))
                             .padding([3, 8]),
-                        button(text("Off").size(10))
+                        button(text("Off").size(11))
                             .on_press(Message::SetAntiFlicker(AntiFlickerMode::Off))
                             .style(theme::clean_button_style(self.anti_flicker == AntiFlickerMode::Off, false))
                             .padding([3, 8]),
                     ]
-                    .spacing(4)
+                    .spacing(6)
                     .align_y(Alignment::Center),
                 ]
-                .spacing(10),
+                .spacing(10)
+                .padding([10, 14]),
             )
-            .padding(10)
             .style(theme::settings_inner_box_style)
             .width(Fill),
         ]
-        .spacing(4);
+        .spacing(6);
 
-        // SECTION 3: Color, Brightness & Contrast (Clean White Sliders)
-        let color_section = column![
-            text("3. Color Grading & Contrast (PCB Inspect)").size(11).color(theme::COLOR_TEXT_MUTED),
+        // SECTION 3: Exposure, Contrast, Brightness & Saturation
+        let image_tune_section = column![
+            text("3. Precision DSP Tuning (Clean White Rails)").size(11).color(theme::COLOR_TEXT_MUTED),
             container(
                 column![
                     row![
-                        text("Brightness:").size(11).color(theme::COLOR_TEXT),
-                        text(format!("{}", self.brightness))
-                            .size(11)
-                            .color(theme::COLOR_TEXT_MUTED),
+                        text(format!("Brightness: {}", self.brightness)).size(11).color(theme::COLOR_TEXT),
                         Space::new().width(Fill),
-                        slider(-50..=50, self.brightness, Message::SetBrightness)
+                        slider(-100..=100, self.brightness, Message::SetBrightness)
                             .style(theme::clean_slider_style)
-                            .width(Length::Fixed(160.0)),
+                            .width(Length::Fixed(200.0)),
                     ]
                     .align_y(Alignment::Center),
                     row![
-                        text("Contrast:").size(11).color(theme::COLOR_TEXT),
-                        text(format!("{:.1}x", self.contrast))
-                            .size(11)
-                            .color(theme::COLOR_TEXT_MUTED),
+                        text(format!("Contrast: {:.2}x", self.contrast)).size(11).color(theme::COLOR_TEXT),
                         Space::new().width(Fill),
-                        slider(5..=20, (self.contrast * 10.0) as i32, |val| {
-                            Message::SetContrast(val as f32 / 10.0)
-                        })
-                        .style(theme::clean_slider_style)
-                        .width(Length::Fixed(160.0)),
+                        slider(0.5..=2.0, self.contrast, Message::SetContrast)
+                            .step(0.05)
+                            .style(theme::clean_slider_style)
+                            .width(Length::Fixed(200.0)),
                     ]
                     .align_y(Alignment::Center),
                     row![
-                        text("Saturation / Color:").size(11).color(theme::COLOR_TEXT),
-                        text(if self.saturation <= 0.05 {
-                            "B&W Circuit Mode".to_string()
-                        } else {
-                            format!("{:.1}x", self.saturation)
-                        })
-                        .size(11)
-                        .color(theme::COLOR_TEXT_MUTED),
+                        text(format!("Saturation: {:.2}x", self.saturation)).size(11).color(theme::COLOR_TEXT),
                         Space::new().width(Fill),
-                        slider(0..=20, (self.saturation * 10.0) as i32, |val| {
-                            Message::SetSaturation(val as f32 / 10.0)
-                        })
-                        .style(theme::clean_slider_style)
-                        .width(Length::Fixed(160.0)),
+                        slider(0.0..=2.0, self.saturation, Message::SetSaturation)
+                            .step(0.05)
+                            .style(theme::clean_slider_style)
+                            .width(Length::Fixed(200.0)),
                     ]
                     .align_y(Alignment::Center),
                 ]
-                .spacing(8),
+                .spacing(8)
+                .padding([10, 14]),
             )
-            .padding(10)
             .style(theme::settings_inner_box_style)
             .width(Fill),
         ]
-        .spacing(4);
+        .spacing(6);
 
-        // SECTION 4: Optics, Zoom & Orientation
-        let optics_section = column![
-            text("4. Optics, Digital Zoom & Orientation").size(11).color(theme::COLOR_TEXT_MUTED),
+        // SECTION 4: Geometric Orientation & Zoom
+        let geom_section = column![
+            text("4. Geometry & Composition").size(11).color(theme::COLOR_TEXT_MUTED),
             container(
                 column![
                     row![
-                        render_svg(icons::ICON_FOCUS, 14.0, self.auto_focus, false),
-                        text("Hardware Auto-Focus").size(11).color(theme::COLOR_TEXT),
+                        text(format!("Digital Zoom: {:.2}x", self.zoom_level)).size(11).color(theme::COLOR_TEXT),
                         Space::new().width(Fill),
-                        button(text(if self.auto_focus { "Active" } else { "Off" }).size(10))
-                            .on_press(Message::ToggleAutoFocus)
-                            .style(theme::clean_button_style(self.auto_focus, false))
-                            .padding([3, 10]),
+                        slider(1.0..=4.0, self.zoom_level, Message::SetZoom)
+                            .step(0.05)
+                            .style(theme::clean_slider_style)
+                            .width(Length::Fixed(200.0)),
                     ]
                     .align_y(Alignment::Center),
                     row![
-                        text("Digital Zoom:").size(11).color(theme::COLOR_TEXT),
-                        text(format!("{:.2}x", self.zoom_level))
-                            .size(11)
-                            .color(theme::COLOR_TEXT_MUTED),
+                        text("Mirror Feed:").size(11).color(theme::COLOR_TEXT),
                         Space::new().width(Fill),
-                        slider(100..=300, (self.zoom_level * 100.0) as i32, |val| {
-                            Message::SetZoom(val as f32 / 100.0)
-                        })
-                        .style(theme::clean_slider_style)
-                        .width(Length::Fixed(160.0)),
-                    ]
-                    .align_y(Alignment::Center),
-                    row![
-                        text("Mirror / Horizontal Flip:").size(11).color(theme::COLOR_TEXT),
-                        Space::new().width(Fill),
-                        button(text(if self.is_flip { "Mirrored" } else { "Normal" }).size(10))
+                        button(text(if self.is_flip { "Mirrored [F]" } else { "Normal [F]" }).size(11))
                             .on_press(Message::ToggleFlip)
                             .style(theme::clean_button_style(self.is_flip, false))
                             .padding([3, 10]),
                     ]
                     .align_y(Alignment::Center),
                     row![
-                        text("Rotation Angle:").size(11).color(theme::COLOR_TEXT),
+                        text("Rotation:").size(11).color(theme::COLOR_TEXT),
                         Space::new().width(Fill),
-                        button(text("0°").size(10))
+                        button(text("0°").size(11))
                             .on_press(Message::SetRotation(0))
                             .style(theme::clean_button_style(self.rotation_deg == 0, false))
                             .padding([3, 8]),
-                        button(text("90°").size(10))
+                        button(text("90°").size(11))
                             .on_press(Message::SetRotation(90))
                             .style(theme::clean_button_style(self.rotation_deg == 90, false))
                             .padding([3, 8]),
-                        button(text("180°").size(10))
+                        button(text("180°").size(11))
                             .on_press(Message::SetRotation(180))
                             .style(theme::clean_button_style(self.rotation_deg == 180, false))
                             .padding([3, 8]),
-                        button(text("270°").size(10))
+                        button(text("270°").size(11))
                             .on_press(Message::SetRotation(270))
                             .style(theme::clean_button_style(self.rotation_deg == 270, false))
                             .padding([3, 8]),
                     ]
-                    .spacing(4)
+                    .spacing(6)
                     .align_y(Alignment::Center),
                 ]
-                .spacing(8),
+                .spacing(8)
+                .padding([10, 14]),
             )
-            .padding(10)
             .style(theme::settings_inner_box_style)
             .width(Fill),
         ]
-        .spacing(4);
+        .spacing(6);
 
-        // SECTION 5: Circuit Teaching & Inspection Tools
-        let teaching_section = column![
-            text("5. Circuit Teaching & Micro-Inspection Tools").size(11).color(theme::COLOR_TEXT_MUTED),
+        // SECTION 5: AI & DSP Enhancements (CAS, Peaking, Face HUD)
+        let ai_section = column![
+            text("5. DSP Filters & Face Tracking").size(11).color(theme::COLOR_TEXT_MUTED),
             container(
                 column![
                     row![
-                        render_svg(icons::ICON_WAND, 14.0, self.cas_sharpen, false),
                         column![
-                            text("CAS Circuit Sharpening (AMD FidelityFX)").size(11).color(theme::COLOR_TEXT),
-                            text("Contrast Adaptive Sharpening for IC pins and circuit traces").size(10).color(theme::COLOR_TEXT_MUTED),
+                            text("CAS Adaptive Sharpening:").size(11).color(theme::COLOR_TEXT),
+                            text("Clean contrast-adaptive high-pass edge crisping").size(10).color(theme::COLOR_TEXT_MUTED),
                         ],
                         Space::new().width(Fill),
-                        button(text(if self.cas_sharpen { "Active" } else { "Off" }).size(10))
+                        button(text(if self.cas_sharpen { "Active" } else { "Off" }).size(11))
                             .on_press(Message::ToggleCasSharpen)
                             .style(theme::clean_button_style(self.cas_sharpen, false))
                             .padding([3, 10]),
@@ -1648,251 +2624,147 @@ impl AutoCamApp {
                     .align_y(Alignment::Center),
                     if self.cas_sharpen {
                         row![
-                            text("CAS Sharpness Strength:").size(11).color(theme::COLOR_TEXT),
-                            text(format!("{:.0}%", self.cas_intensity * 100.0)).size(11).color(theme::COLOR_TEXT_MUTED),
+                            text(format!("CAS Intensity: {:.2}", self.cas_intensity)).size(11).color(theme::COLOR_TEXT),
                             Space::new().width(Fill),
-                            slider(10..=100, (self.cas_intensity * 100.0) as i32, |val| {
-                                Message::SetCasIntensity(val as f32 / 100.0)
-                            })
-                            .style(theme::clean_slider_style)
-                            .width(Length::Fixed(160.0)),
+                            slider(0.0..=1.0, self.cas_intensity, Message::SetCasIntensity)
+                                .step(0.05)
+                                .style(theme::clean_slider_style)
+                                .width(Length::Fixed(200.0)),
                         ]
                         .align_y(Alignment::Center)
                     } else {
-                        row![]
+                        row![].into()
                     },
                     row![
-                        render_svg(icons::ICON_PEAKING, 14.0, self.focus_peaking, false),
                         column![
-                            text("Focus Peaking (Highlight In-Focus Traces)").size(11).color(theme::COLOR_TEXT),
-                            text("Highlights sharp solder points and IC text in neon green").size(10).color(theme::COLOR_TEXT_MUTED),
+                            text("Hardware Focus Peaking:").size(11).color(theme::COLOR_TEXT),
+                            text("Highlights in-focus edges with green contours").size(10).color(theme::COLOR_TEXT_MUTED),
                         ],
                         Space::new().width(Fill),
-                        button(text(if self.focus_peaking { "Active" } else { "Off" }).size(10))
+                        button(text(if self.focus_peaking { "Active" } else { "Off" }).size(11))
                             .on_press(Message::ToggleFocusPeaking)
                             .style(theme::clean_button_style(self.focus_peaking, false))
                             .padding([3, 10]),
                     ]
                     .align_y(Alignment::Center),
-                    if self.focus_peaking {
-                        row![
-                            text("Peaking Sensitivity:").size(11).color(theme::COLOR_TEXT),
-                            text(format!("{}", self.peaking_threshold)).size(11).color(theme::COLOR_TEXT_MUTED),
-                            Space::new().width(Fill),
-                            slider(20..=90, self.peaking_threshold, Message::SetPeakingThreshold)
-                                .style(theme::clean_slider_style)
-                                .width(Length::Fixed(160.0)),
-                        ]
-                        .align_y(Alignment::Center)
-                    } else {
-                        row![]
-                    },
                     row![
-                        render_svg(icons::ICON_FACE, 14.0, self.face_detection, false),
                         column![
-                            text("Presenter Face Tracking HUD").size(11).color(theme::COLOR_TEXT),
-                            text("High-precision head clustering with zero-offset direct overlay").size(10).color(theme::COLOR_TEXT_MUTED),
+                            text("Face Tracking HUD Corner Brackets:").size(11).color(theme::COLOR_TEXT),
+                            text("Real-time presenter face targeting overlay").size(10).color(theme::COLOR_TEXT_MUTED),
                         ],
                         Space::new().width(Fill),
-                        button(text(if self.face_detection { "Active" } else { "Off" }).size(10))
+                        button(text(if self.face_detection { "Active" } else { "Off" }).size(11))
                             .on_press(Message::ToggleFaceDetection)
                             .style(theme::clean_button_style(self.face_detection, false))
                             .padding([3, 10]),
                     ]
                     .align_y(Alignment::Center),
                     row![
-                        render_svg(icons::ICON_MOTION, 14.0, self.frame_interpolation, false),
                         column![
-                            text("Motion Smoothing (60 FPS Interpolation)").size(11).color(theme::COLOR_TEXT),
-                            text("Sub-frame motion blending for silky smooth camera video").size(10).color(theme::COLOR_TEXT_MUTED),
+                            text("60 FPS Inter-Frame Interpolation:").size(11).color(theme::COLOR_TEXT),
+                            text("Synthesizes smooth in-between video frames").size(10).color(theme::COLOR_TEXT_MUTED),
                         ],
                         Space::new().width(Fill),
-                        button(text(if self.frame_interpolation { "Active" } else { "Off" }).size(10))
+                        button(text(if self.frame_interpolation { "Active" } else { "Off" }).size(11))
                             .on_press(Message::ToggleFrameInterpolation)
                             .style(theme::clean_button_style(self.frame_interpolation, false))
                             .padding([3, 10]),
                     ]
                     .align_y(Alignment::Center),
                     row![
-                        text("Grid Alignment Overlay:").size(11).color(theme::COLOR_TEXT),
+                        text("Composition Grid:").size(11).color(theme::COLOR_TEXT),
                         Space::new().width(Fill),
-                        button(text("Off").size(10))
+                        button(text("Off").size(11))
                             .on_press(Message::SetGridMode(GridMode::Off))
                             .style(theme::clean_button_style(self.grid_mode == GridMode::Off, false))
                             .padding([3, 8]),
-                        button(text("3x3 Thirds").size(10))
+                        button(text("3x3 Thirds").size(11))
                             .on_press(Message::SetGridMode(GridMode::RuleOfThirds))
                             .style(theme::clean_button_style(self.grid_mode == GridMode::RuleOfThirds, false))
                             .padding([3, 8]),
-                        button(text("Crosshair").size(10))
+                        button(text("Crosshair").size(11))
                             .on_press(Message::SetGridMode(GridMode::CenterCrosshair))
                             .style(theme::clean_button_style(self.grid_mode == GridMode::CenterCrosshair, false))
                             .padding([3, 8]),
                     ]
-                    .spacing(4)
+                    .spacing(6)
                     .align_y(Alignment::Center),
                 ]
-                .spacing(10),
+                .spacing(8)
+                .padding([10, 14]),
             )
-            .padding(10)
             .style(theme::settings_inner_box_style)
             .width(Fill),
         ]
-        .spacing(4);
+        .spacing(6);
 
-        // SECTION 6: Customizable Keyboard Shortcuts
-        let shortcut_rows = column![
-            shortcut_config_row(
-                "Freeze / Resume Live",
-                format_key(&self.keybindings.freeze),
-                self.rebinding_action == Some(ShortcutAction::Freeze),
-                Message::StartRebinding(ShortcutAction::Freeze),
-            ),
-            shortcut_config_row(
-                "Mirror / Horizontal Flip",
-                format_key(&self.keybindings.flip),
-                self.rebinding_action == Some(ShortcutAction::Flip),
-                Message::StartRebinding(ShortcutAction::Flip),
-            ),
-            shortcut_config_row(
-                "Rotate 90 Degrees",
-                format_key(&self.keybindings.rotate),
-                self.rebinding_action == Some(ShortcutAction::Rotate),
-                Message::StartRebinding(ShortcutAction::Rotate),
-            ),
-            shortcut_config_row(
-                "Cycle Grid Overlay",
-                format_key(&self.keybindings.grid),
-                self.rebinding_action == Some(ShortcutAction::Grid),
-                Message::StartRebinding(ShortcutAction::Grid),
-            ),
-            shortcut_config_row(
-                "Toggle Auto Focus",
-                format_key(&self.keybindings.auto_focus),
-                self.rebinding_action == Some(ShortcutAction::AutoFocus),
-                Message::StartRebinding(ShortcutAction::AutoFocus),
-            ),
-            shortcut_config_row(
-                "Toggle Auto EV",
-                format_key(&self.keybindings.auto_ev),
-                self.rebinding_action == Some(ShortcutAction::AutoEv),
-                Message::StartRebinding(ShortcutAction::AutoEv),
-            ),
-            shortcut_config_row(
-                "Presenter Face Tracking HUD",
-                format_key(&self.keybindings.face_hud),
-                self.rebinding_action == Some(ShortcutAction::FaceHud),
-                Message::StartRebinding(ShortcutAction::FaceHud),
-            ),
-            shortcut_config_row(
-                "Toggle 60 FPS Motion Smoothing",
-                format_key(&self.keybindings.interpolation),
-                self.rebinding_action == Some(ShortcutAction::Interpolation),
-                Message::StartRebinding(ShortcutAction::Interpolation),
-            ),
-            shortcut_config_row(
-                "Capture Snapshot Still",
-                format_key(&self.keybindings.snapshot),
-                self.rebinding_action == Some(ShortcutAction::Snapshot),
-                Message::StartRebinding(ShortcutAction::Snapshot),
-            ),
-            shortcut_config_row(
-                "Toggle Picture-in-Picture (PiP)",
-                format_key(&self.keybindings.pip),
-                self.rebinding_action == Some(ShortcutAction::Pip),
-                Message::StartRebinding(ShortcutAction::Pip),
-            ),
-            shortcut_config_row(
-                "Toggle Fullscreen",
-                format_key(&self.keybindings.fullscreen),
-                self.rebinding_action == Some(ShortcutAction::Fullscreen),
-                Message::StartRebinding(ShortcutAction::Fullscreen),
-            ),
-            shortcut_config_row(
-                "Toggle Settings Window",
-                format_key(&self.keybindings.settings),
-                self.rebinding_action == Some(ShortcutAction::Settings),
-                Message::StartRebinding(ShortcutAction::Settings),
-            ),
-            shortcut_config_row(
-                "Zoom In",
-                format_key(&self.keybindings.zoom_in),
-                self.rebinding_action == Some(ShortcutAction::ZoomIn),
-                Message::StartRebinding(ShortcutAction::ZoomIn),
-            ),
-            shortcut_config_row(
-                "Zoom Out",
-                format_key(&self.keybindings.zoom_out),
-                self.rebinding_action == Some(ShortcutAction::ZoomOut),
-                Message::StartRebinding(ShortcutAction::ZoomOut),
-            ),
-        ]
-        .spacing(4);
-
+        // SECTION 6: Customizable Keyboard Shortcuts Manager
         let shortcuts_section = column![
             row![
-                text("6. Custom Keyboard Shortcuts (Click to Rebind)").size(11).color(theme::COLOR_TEXT_MUTED),
+                text("6. Custom Keyboard Shortcuts Manager").size(11).color(theme::COLOR_TEXT_MUTED),
                 Space::new().width(Fill),
-                button(text("Reset Shortcuts").size(10))
+                button(text("Reset to Defaults").size(10))
                     .on_press(Message::ResetShortcuts)
                     .style(theme::clean_button_style(false, false))
                     .padding([2, 6]),
             ]
             .align_y(Alignment::Center),
-            container(shortcut_rows)
-                .padding(10)
-                .style(theme::settings_inner_box_style)
-                .width(Fill),
-        ]
-        .spacing(4);
-
-        // SECTION 7: Storage & Maintenance
-        let storage_section = column![
-            text("7. Captures & Maintenance").size(11).color(theme::COLOR_TEXT_MUTED),
             container(
                 column![
-                    row![
-                        column![
-                            text("Snapshot Directory: captures/").size(11).color(theme::COLOR_TEXT),
-                            text("High-resolution PNG snapshots with zero compression loss").size(10).color(theme::COLOR_TEXT_MUTED),
-                        ],
-                        Space::new().width(Fill),
-                        button(text("Open Captures Folder").size(11))
-                            .on_press(Message::OpenCapturesFolder)
-                            .style(theme::clean_button_style(false, false))
-                            .padding([4, 12]),
-                    ]
-                    .align_y(Alignment::Center),
-                    row![
-                        text("Reset All Configuration:").size(11).color(theme::COLOR_TEXT),
-                        Space::new().width(Fill),
-                        button(text("Reset All to Defaults").size(11))
-                            .on_press(Message::ResetDefaults)
-                            .style(theme::clean_button_style(false, true))
-                            .padding([4, 12]),
-                    ]
-                    .align_y(Alignment::Center),
+                    shortcut_config_row("Freeze Live Frame:", format_key(&self.keybindings.freeze), self.rebinding_action == Some(ShortcutAction::Freeze), Message::StartRebinding(ShortcutAction::Freeze)),
+                    shortcut_config_row("Mirror / Flip:", format_key(&self.keybindings.flip), self.rebinding_action == Some(ShortcutAction::Flip), Message::StartRebinding(ShortcutAction::Flip)),
+                    shortcut_config_row("Rotate 90°:", format_key(&self.keybindings.rotate), self.rebinding_action == Some(ShortcutAction::Rotate), Message::StartRebinding(ShortcutAction::Rotate)),
+                    shortcut_config_row("Cycle Grid:", format_key(&self.keybindings.grid), self.rebinding_action == Some(ShortcutAction::Grid), Message::StartRebinding(ShortcutAction::Grid)),
+                    shortcut_config_row("Toggle Auto Focus:", format_key(&self.keybindings.auto_focus), self.rebinding_action == Some(ShortcutAction::AutoFocus), Message::StartRebinding(ShortcutAction::AutoFocus)),
+                    shortcut_config_row("Toggle Auto EV:", format_key(&self.keybindings.auto_ev), self.rebinding_action == Some(ShortcutAction::AutoEv), Message::StartRebinding(ShortcutAction::AutoEv)),
+                    shortcut_config_row("Face Tracking HUD:", format_key(&self.keybindings.face_hud), self.rebinding_action == Some(ShortcutAction::FaceHud), Message::StartRebinding(ShortcutAction::FaceHud)),
+                    shortcut_config_row("Frame Interpolation:", format_key(&self.keybindings.interpolation), self.rebinding_action == Some(ShortcutAction::Interpolation), Message::StartRebinding(ShortcutAction::Interpolation)),
+                    shortcut_config_row("Take Snapshot:", format_key(&self.keybindings.snapshot), self.rebinding_action == Some(ShortcutAction::Snapshot), Message::StartRebinding(ShortcutAction::Snapshot)),
+                    shortcut_config_row("Record Video:", format_key(&self.keybindings.record), self.rebinding_action == Some(ShortcutAction::Record), Message::StartRebinding(ShortcutAction::Record)),
+                    shortcut_config_row("Picture-in-Picture:", format_key(&self.keybindings.pip), self.rebinding_action == Some(ShortcutAction::Pip), Message::StartRebinding(ShortcutAction::Pip)),
+                    shortcut_config_row("Toggle Fullscreen:", format_key(&self.keybindings.fullscreen), self.rebinding_action == Some(ShortcutAction::Fullscreen), Message::StartRebinding(ShortcutAction::Fullscreen)),
+                    shortcut_config_row("Toggle Settings:", format_key(&self.keybindings.settings), self.rebinding_action == Some(ShortcutAction::Settings), Message::StartRebinding(ShortcutAction::Settings)),
+                    shortcut_config_row("Zoom In:", format_key(&self.keybindings.zoom_in), self.rebinding_action == Some(ShortcutAction::ZoomIn), Message::StartRebinding(ShortcutAction::ZoomIn)),
+                    shortcut_config_row("Zoom Out:", format_key(&self.keybindings.zoom_out), self.rebinding_action == Some(ShortcutAction::ZoomOut), Message::StartRebinding(ShortcutAction::ZoomOut)),
                 ]
-                .spacing(8),
+                .spacing(6)
+                .padding([10, 14]),
             )
-            .padding(10)
             .style(theme::settings_inner_box_style)
             .width(Fill),
         ]
-        .spacing(4);
+        .spacing(6);
+
+        let bottom_actions = row![
+            button(text("Open Captures Folder").size(11))
+                .on_press(Message::OpenCapturesFolder)
+                .style(theme::clean_button_style(false, false))
+                .padding([5, 12]),
+            button(text("Reset Camera Defaults").size(11))
+                .on_press(Message::ResetDefaults)
+                .style(theme::clean_button_style(false, false))
+                .padding([5, 12]),
+            Space::new().width(Fill),
+            button(text("Done").size(11))
+                .on_press(Message::CloseSettingsWindow)
+                .style(theme::clean_button_style(true, false))
+                .padding([5, 16]),
+        ]
+        .spacing(8)
+        .align_y(Alignment::Center);
 
         let scroll_body = scrollable(
             column![
                 dev_section,
-                shutter_section,
-                color_section,
-                optics_section,
-                teaching_section,
+                flicker_section,
+                image_tune_section,
+                geom_section,
+                ai_section,
                 shortcuts_section,
-                storage_section,
+                bottom_actions,
             ]
-            .spacing(12)
-            .padding([12, 16]),
+            .spacing(14)
+            .padding([14, 16]),
         )
         .width(Fill)
         .height(Fill);
