@@ -8,6 +8,8 @@ use iced::window;
 use iced::{Alignment, ContentFit, Element, Fill, Length, Subscription, Task};
 use std::time::Duration;
 
+const APP_ICON_BYTES: &[u8] = include_bytes!("../public/icon.png");
+
 pub struct AutoCamApp {
     camera_manager: Option<CameraManager>,
     available_devices: Vec<CameraDeviceInfo>,
@@ -269,10 +271,15 @@ impl AutoCamApp {
 
     /// Full Normal Mode with Custom Draggable Title Bar and Circuit Teaching Tools
     fn view_normal(&self) -> Element<'_, Message> {
+        let app_logo = image(image::Handle::from_bytes(APP_ICON_BYTES))
+            .width(Length::Fixed(18.0))
+            .height(Length::Fixed(18.0));
+
         // 1. Draggable Top Title Bar (Flush with window edges)
         let title_bar = mouse_area(
             container(
                 row![
+                    app_logo,
                     text("AutoCam").size(14),
                     text("Teaching").size(11).color(theme::COLOR_TEXT_MUTED),
                     Space::new().width(Length::Fixed(12.0)),
@@ -418,10 +425,15 @@ impl AutoCamApp {
                 .into()
         };
 
+        let pip_logo = image(image::Handle::from_bytes(APP_ICON_BYTES))
+            .width(Length::Fixed(14.0))
+            .height(Length::Fixed(14.0));
+
         let overlay_header: Element<'_, Message> = if self.pip_hovered {
             mouse_area(
                 container(
                     row![
+                        pip_logo,
                         text("AutoCam").size(11),
                         Space::new().width(Fill),
                         button(text(if self.is_frozen { "▶" } else { "❚❚" }).size(11))
@@ -465,9 +477,12 @@ impl AutoCamApp {
 }
 
 fn main() -> iced::Result {
+    let icon = window::icon::from_file_data(APP_ICON_BYTES, None).ok();
+
     iced::application(AutoCamApp::new, AutoCamApp::update, AutoCamApp::view)
         .subscription(AutoCamApp::subscription)
         .window(window::Settings {
+            icon,
             decorations: false,
             transparent: true,
             size: iced::Size::new(960.0, 600.0),

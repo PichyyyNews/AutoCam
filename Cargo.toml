@@ -8,6 +8,9 @@ iced = { version = "0.14.0", features = ["image", "tokio"] }
 nokhwa = { version = "0.10.11", features = ["input-native"] }
 rusqlite = { version = "0.43.0", features = ["bundled"] }
 
+[build-dependencies]
+winres = "0.1"
+
 # ==============================================================================
 # Full Speed Release Profile: Maximum Runtime Performance & Minimal Binary Size
 # ==============================================================================
