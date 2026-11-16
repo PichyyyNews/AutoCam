@@ -49,8 +49,8 @@ pub fn title_bar_style(_theme: &Theme) -> container::Style {
     container::Style {
         background: Some(Background::Color(COLOR_SURFACE)),
         border: Border {
-            color: COLOR_BORDER,
-            width: 1.0,
+            color: Color::TRANSPARENT,
+            width: 0.0,
             radius: Radius::default(),
         },
         text_color: Some(COLOR_TEXT),
@@ -64,8 +64,8 @@ pub fn pip_overlay_title_bar_style(_theme: &Theme) -> container::Style {
             0.06, 0.06, 0.07, 0.88,
         ))),
         border: Border {
-            color: COLOR_BORDER,
-            width: 1.0,
+            color: Color::TRANSPARENT,
+            width: 0.0,
             radius: Radius::default(),
         },
         text_color: Some(COLOR_TEXT),
@@ -85,8 +85,8 @@ pub fn controls_panel_style(_theme: &Theme) -> container::Style {
     container::Style {
         background: Some(Background::Color(COLOR_SURFACE)),
         border: Border {
-            color: COLOR_BORDER,
-            width: 1.0,
+            color: Color::TRANSPARENT,
+            width: 0.0,
             radius: Radius::default(),
         },
         text_color: Some(COLOR_TEXT),
@@ -140,17 +140,11 @@ pub fn settings_inner_box_style(_theme: &Theme) -> container::Style {
 }
 
 pub fn pick_list_style(_theme: &Theme, status: pick_list::Status) -> pick_list::Style {
-    let (bg, border_color, border_width) = match status {
-        pick_list::Status::Hovered | pick_list::Status::Opened { .. } => (
-            Background::Color(COLOR_SURFACE_MUTED),
-            COLOR_BORDER_ACTIVE,
-            1.0,
-        ),
-        _ => (
-            Background::Color(COLOR_SURFACE),
-            Color::TRANSPARENT,
-            0.0,
-        ),
+    let bg = match status {
+        pick_list::Status::Hovered | pick_list::Status::Opened { .. } => {
+            Background::Color(COLOR_SURFACE_MUTED)
+        }
+        _ => Background::Color(COLOR_SURFACE),
     };
 
     pick_list::Style {
@@ -159,8 +153,8 @@ pub fn pick_list_style(_theme: &Theme, status: pick_list::Status) -> pick_list::
         handle_color: COLOR_TEXT,
         background: bg,
         border: Border {
-            color: border_color,
-            width: border_width,
+            color: Color::TRANSPARENT,
+            width: 0.0,
             radius: RADIUS_SM,
         },
     }
