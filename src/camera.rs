@@ -273,6 +273,11 @@ fn process_frame(
     let total_pixels = (cur_w * cur_h) as usize;
     let total_bytes = total_pixels * 4;
 
+    // Fast-path: No transforms needed (the most common case during regular camera usage)
+    if (zoom - 1.0).abs() <= 0.05 && !flip && rotate == 0 {
+        return (cur_w, cur_h, src.to_vec());
+    }
+
     scratch.resize(total_bytes, 0);
 
     // 1. Zoom (Digital center crop and bilinear/nearest stretch)

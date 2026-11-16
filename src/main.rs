@@ -22,6 +22,7 @@ pub struct AutoCamApp {
     rotation_deg: u16,
     zoom_level: f32,
     image_handle: Option<image::Handle>,
+    app_icon_handle: image::Handle,
     frame_count: u64,
     status_text: String,
 }
@@ -78,6 +79,7 @@ impl AutoCamApp {
                 rotation_deg: 0,
                 zoom_level: 1.0,
                 image_handle: None,
+                app_icon_handle: image::Handle::from_bytes(APP_ICON_BYTES),
                 frame_count: 0,
                 status_text,
             },
@@ -87,7 +89,7 @@ impl AutoCamApp {
 
     pub fn subscription(&self) -> Subscription<Message> {
         Subscription::batch(vec![
-            iced::time::every(Duration::from_millis(33)).map(|_| Message::Tick),
+            iced::time::every(Duration::from_millis(16)).map(|_| Message::Tick),
             keyboard::listen().map(Message::KeyboardEvent),
         ])
     }
@@ -271,7 +273,7 @@ impl AutoCamApp {
 
     /// Full Normal Mode with Custom Draggable Title Bar and Circuit Teaching Tools
     fn view_normal(&self) -> Element<'_, Message> {
-        let app_logo = image(image::Handle::from_bytes(APP_ICON_BYTES))
+        let app_logo = image(self.app_icon_handle.clone())
             .width(Length::Fixed(18.0))
             .height(Length::Fixed(18.0));
 
@@ -425,7 +427,7 @@ impl AutoCamApp {
                 .into()
         };
 
-        let pip_logo = image(image::Handle::from_bytes(APP_ICON_BYTES))
+        let pip_logo = image(self.app_icon_handle.clone())
             .width(Length::Fixed(14.0))
             .height(Length::Fixed(14.0));
 

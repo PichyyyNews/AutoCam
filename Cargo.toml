@@ -4,7 +4,7 @@ version = "0.0.1"
 edition = "2024"
 
 [dependencies]
-iced = { version = "0.14.0", features = ["image", "tokio"] }
+iced = { version = "0.14.0", default-features = false, features = ["tiny-skia", "image", "tokio"] }
 nokhwa = { version = "0.10.11", features = ["input-native"] }
 rusqlite = { version = "0.43.0", features = ["bundled"] }
 
