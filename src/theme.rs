@@ -22,6 +22,13 @@ pub const RADIUS_SM: Radius = Radius {
     bottom_left: 4.0,
 };
 
+pub const RADIUS_MD: Radius = Radius {
+    top_left: 8.0,
+    top_right: 8.0,
+    bottom_right: 8.0,
+    bottom_left: 8.0,
+};
+
 // Root Window Style - Zero white border, 100% flush rectangular dark frame
 pub fn root_window_style(_theme: &Theme) -> container::Style {
     container::Style {
@@ -80,6 +87,51 @@ pub fn controls_panel_style(_theme: &Theme) -> container::Style {
             color: COLOR_BORDER,
             width: 1.0,
             radius: Radius::default(),
+        },
+        text_color: Some(COLOR_TEXT),
+        ..Default::default()
+    }
+}
+
+pub fn tooltip_style(_theme: &Theme) -> container::Style {
+    container::Style {
+        background: Some(Background::Color(Color::from_rgba(
+            0.12, 0.12, 0.14, 0.96,
+        ))),
+        border: Border {
+            color: COLOR_BORDER_ACTIVE,
+            width: 1.0,
+            radius: RADIUS_SM,
+        },
+        text_color: Some(COLOR_TEXT),
+        shadow: Shadow::default(),
+        ..Default::default()
+    }
+}
+
+pub fn settings_dialog_style(_theme: &Theme) -> container::Style {
+    container::Style {
+        background: Some(Background::Color(Color::from_rgba(
+            0.07, 0.07, 0.08, 0.98,
+        ))),
+        border: Border {
+            color: COLOR_BORDER_ACTIVE,
+            width: 1.0,
+            radius: RADIUS_MD,
+        },
+        shadow: Shadow::default(),
+        text_color: Some(COLOR_TEXT),
+        ..Default::default()
+    }
+}
+
+pub fn settings_inner_box_style(_theme: &Theme) -> container::Style {
+    container::Style {
+        background: Some(Background::Color(COLOR_SURFACE)),
+        border: Border {
+            color: COLOR_BORDER,
+            width: 1.0,
+            radius: RADIUS_SM,
         },
         text_color: Some(COLOR_TEXT),
         ..Default::default()

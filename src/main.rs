@@ -1,11 +1,12 @@
 mod camera;
+mod icons;
 mod theme;
 
 use camera::{CameraControl, CameraDeviceInfo, CameraManager, VideoResolution};
 use iced::keyboard::{self, key, Key};
 use iced::mouse;
 use iced::widget::{
-    button, column, container, image, mouse_area, pick_list, row, stack, text, Space,
+    button, column, container, image, mouse_area, pick_list, row, stack, svg, text, tooltip, Space,
 };
 use iced::window;
 use iced::{Alignment, ContentFit, Element, Fill, Length, Subscription, Task};
@@ -23,6 +24,7 @@ pub struct AutoCamApp {
     is_flip: bool,
     is_frozen: bool,
     is_fullscreen: bool,
+    show_settings: bool,
     rotation_deg: u16,
     zoom_level: f32,
     image_handle: Option<image::Handle>,
@@ -39,9 +41,11 @@ pub enum Message {
     KeyboardEvent(keyboard::Event),
     DeviceSelected(CameraDeviceInfo),
     ToggleResolution,
+    SetResolution(VideoResolution),
     ToggleFlip,
     ToggleFreeze,
     ToggleFullscreen,
+    ToggleSettings,
     RotateNext,
     ZoomIn,
     ZoomOut,
@@ -69,10 +73,10 @@ impl AutoCamApp {
             None
         };
 
-        let status_text = if selected_device.is_some() {
-            "Camera stream active".to_string()
+        let status_text = if let Some(ref dev) = selected_device {
+            format!("Connected: {}", dev.name)
         } else {
-            "No camera detected - connect camera to start".to_string()
+            "No camera detected".to_string()
         };
 
         (
@@ -86,6 +90,7 @@ impl AutoCamApp {
                 is_flip: true, // Enabled by default to eliminate orientation confusion
                 is_frozen: false,
                 is_fullscreen: false,
+                show_settings: false,
                 rotation_deg: 0,
                 zoom_level: 1.0,
                 image_handle: None,
@@ -133,25 +138,22 @@ impl AutoCamApp {
                     self.available_devices = new_devices.clone();
 
                     if was_empty {
-                        // Device hot-plugged while no camera was active! Auto-connect without restart
                         if let Some(first_dev) = self.available_devices.first().cloned() {
-                            self.status_text = format!("Camera connected: {}", first_dev.name);
+                            self.status_text = format!("Connected: {}", first_dev.name);
                             return self.update(Message::DeviceSelected(first_dev));
                         }
                     } else if let Some(ref current) = self.selected_device {
                         let still_exists =
                             self.available_devices.iter().any(|d| d.name == current.name);
                         if !still_exists {
-                            // Currently selected camera was unplugged!
                             if let Some(next_dev) = self.available_devices.first().cloned() {
-                                self.status_text = format!("Switched to {}", next_dev.name);
+                                self.status_text = format!("Connected: {}", next_dev.name);
                                 return self.update(Message::DeviceSelected(next_dev));
                             } else {
                                 self.selected_device = None;
                                 self.camera_manager = None;
                                 self.image_handle = None;
-                                self.status_text =
-                                    "Camera disconnected - waiting for device...".to_string();
+                                self.status_text = "Camera disconnected".to_string();
                             }
                         }
                     }
@@ -164,6 +166,13 @@ impl AutoCamApp {
                     match key {
                         Key::Named(key::Named::Space) => return self.update(Message::ToggleFreeze),
                         Key::Named(key::Named::F11) => return self.update(Message::ToggleFullscreen),
+                        Key::Named(key::Named::Escape) => {
+                            if self.show_settings {
+                                self.show_settings = false;
+                            } else if self.is_fullscreen {
+                                return self.update(Message::ToggleFullscreen);
+                            }
+                        }
                         Key::Character(ref ch) => {
                             if ch.eq_ignore_ascii_case("f") {
                                 return self.update(Message::ToggleFlip);
@@ -171,6 +180,8 @@ impl AutoCamApp {
                                 return self.update(Message::RotateNext);
                             } else if ch.eq_ignore_ascii_case("p") {
                                 return self.update(Message::TogglePip);
+                            } else if ch.eq_ignore_ascii_case("s") {
+                                return self.update(Message::ToggleSettings);
                             } else if ch == "+" || ch == "=" {
                                 return self.update(Message::ZoomIn);
                             } else if ch == "-" {
@@ -198,14 +209,18 @@ impl AutoCamApp {
             }
 
             Message::ToggleResolution => {
-                self.resolution = match self.resolution {
+                let next = match self.resolution {
                     VideoResolution::Hd720p => VideoResolution::Fhd1080p,
                     VideoResolution::Fhd1080p => VideoResolution::Hd720p,
                 };
+                self.update(Message::SetResolution(next))
+            }
+
+            Message::SetResolution(res) => {
+                self.resolution = res;
                 if let Some(ref mgr) = self.camera_manager {
                     mgr.send(CameraControl::SwitchResolution(self.resolution));
                 }
-                self.status_text = format!("Resolution: {}", self.resolution.label());
                 Task::none()
             }
 
@@ -222,11 +237,6 @@ impl AutoCamApp {
                 if let Some(ref mgr) = self.camera_manager {
                     mgr.send(CameraControl::SetFreeze(self.is_frozen));
                 }
-                self.status_text = if self.is_frozen {
-                    "Frame Frozen [Space to Resume]".to_string()
-                } else {
-                    "Live Streaming".to_string()
-                };
                 Task::none()
             }
 
@@ -238,6 +248,11 @@ impl AutoCamApp {
                     window::Mode::Windowed
                 };
                 window::latest().and_then(move |id| window::set_mode(id, mode))
+            }
+
+            Message::ToggleSettings => {
+                self.show_settings = !self.show_settings;
+                Task::none()
             }
 
             Message::RotateNext => {
@@ -276,9 +291,9 @@ impl AutoCamApp {
             Message::TogglePip => {
                 self.is_pip = !self.is_pip;
                 self.pip_hovered = false;
+                self.show_settings = false;
 
                 if self.is_pip {
-                    // Enter compact floating PiP (16:9 ratio, AlwaysOnTop)
                     Task::batch(vec![
                         window::latest().and_then(|id| {
                             window::resize(id, iced::Size::new(384.0, 216.0))
@@ -288,7 +303,6 @@ impl AutoCamApp {
                         }),
                     ])
                 } else {
-                    // Restore standard window
                     Task::batch(vec![
                         window::latest().and_then(|id| {
                             window::resize(id, iced::Size::new(960.0, 600.0))
@@ -348,7 +362,7 @@ impl AutoCamApp {
             .width(Length::Fixed(18.0))
             .height(Length::Fixed(18.0));
 
-        // 1. Draggable Top Title Bar (Flush with window edges, strict monochrome)
+        // 1. Draggable Top Title Bar
         let title_bar = mouse_area(
             container(
                 row![
@@ -356,7 +370,7 @@ impl AutoCamApp {
                     text("AutoCam").size(13).color(theme::COLOR_TEXT),
                     text("Teaching").size(11).color(theme::COLOR_TEXT_MUTED),
                     Space::new().width(Length::Fixed(10.0)),
-                    // Camera device picker
+                    // Quick camera device selector
                     pick_list(
                         self.available_devices.clone(),
                         self.selected_device.clone(),
@@ -364,36 +378,70 @@ impl AutoCamApp {
                     )
                     .text_size(12)
                     .padding([3, 8]),
-                    // Resolution Toggle
-                    button(text(self.resolution.label()).size(11))
-                        .on_press(Message::ToggleResolution)
-                        .style(theme::clean_button_style(false, false))
-                        .padding([4, 10]),
-                    // Refresh Device Button (Icon-focused)
-                    button(text("⟳").size(12))
-                        .on_press(Message::RefreshDevices)
-                        .style(theme::clean_button_style(false, false))
-                        .padding([3, 8]),
+                    // Resolution Toggle Button
+                    tooltip(
+                        button(text(self.resolution.label()).size(11))
+                            .on_press(Message::ToggleResolution)
+                            .style(theme::clean_button_style(false, false))
+                            .padding([4, 8]),
+                        container(text("Toggle 720p / 1080p").size(11))
+                            .padding([3, 7])
+                            .style(theme::tooltip_style),
+                        tooltip::Position::Bottom,
+                    ),
+                    // Refresh Device Button
+                    render_icon_btn(
+                        icons::ICON_REFRESH,
+                        "Refresh Devices",
+                        Message::RefreshDevices,
+                        false,
+                        false,
+                        tooltip::Position::Bottom,
+                    ),
                     Space::new().width(Fill),
                     // PiP Switcher Button
-                    button(text("◱ PiP [P]").size(11))
-                        .on_press(Message::TogglePip)
-                        .style(theme::clean_button_style(self.is_pip, false))
-                        .padding([4, 10]),
+                    render_icon_btn(
+                        icons::ICON_PIP,
+                        "Picture in Picture [P]",
+                        Message::TogglePip,
+                        self.is_pip,
+                        false,
+                        tooltip::Position::Bottom,
+                    ),
                     // Fullscreen Button
-                    button(text(if self.is_fullscreen { "🗗" } else { "⛶" }).size(12))
-                        .on_press(Message::ToggleFullscreen)
-                        .style(theme::clean_button_style(self.is_fullscreen, false))
-                        .padding([3, 8]),
+                    render_icon_btn(
+                        if self.is_fullscreen {
+                            icons::ICON_MINIMIZE_2
+                        } else {
+                            icons::ICON_MAXIMIZE
+                        },
+                        if self.is_fullscreen {
+                            "Exit Fullscreen [F11]"
+                        } else {
+                            "Fullscreen [F11]"
+                        },
+                        Message::ToggleFullscreen,
+                        self.is_fullscreen,
+                        false,
+                        tooltip::Position::Bottom,
+                    ),
                     // Minimize and Close
-                    button(text("–").size(12))
-                        .on_press(Message::MinimizeWindow)
-                        .style(theme::clean_button_style(false, false))
-                        .padding([3, 8]),
-                    button(text("✕").size(12))
-                        .on_press(Message::CloseWindow)
-                        .style(theme::clean_button_style(false, true))
-                        .padding([3, 8]),
+                    render_icon_btn(
+                        icons::ICON_MINUS,
+                        "Minimize",
+                        Message::MinimizeWindow,
+                        false,
+                        false,
+                        tooltip::Position::Bottom,
+                    ),
+                    render_icon_btn(
+                        icons::ICON_CLOSE,
+                        "Close",
+                        Message::CloseWindow,
+                        false,
+                        true,
+                        tooltip::Position::Bottom,
+                    ),
                 ]
                 .spacing(6)
                 .align_y(Alignment::Center)
@@ -416,7 +464,7 @@ impl AutoCamApp {
             container(
                 column![
                     text("Waiting for camera feed...").size(14),
-                    text("Plug in or select camera to start streaming")
+                    text("Plug in or select a camera to start streaming")
                         .size(12)
                         .color(theme::COLOR_TEXT_MUTED),
                 ]
@@ -427,61 +475,132 @@ impl AutoCamApp {
             .into()
         };
 
-        let video_viewport = container(video_content)
+        let mut viewport_stack = vec![video_content];
+
+        // If Settings view is open, show modal overlay centered over viewport
+        if self.show_settings {
+            let settings_modal = container(
+                container(self.view_settings_panel())
+                    .style(theme::settings_dialog_style)
+                    .width(Length::Fixed(440.0)),
+            )
+            .center(Fill)
+            .into();
+
+            viewport_stack.push(settings_modal);
+        }
+
+        let video_viewport = container(stack(viewport_stack).width(Fill).height(Fill))
             .style(theme::video_viewport_style)
             .width(Fill)
             .height(Fill);
 
-        // 3. Circuit Teaching Controls Toolbar (Icon-focused, strict monochrome)
+        // 3. Bottom Controls Toolbar: Icon-only buttons with hover tooltips
         let toolbar = container(
             row![
-                // Flip / Mirror
-                button(text("⇄ Mirror [F]").size(12))
-                    .on_press(Message::ToggleFlip)
-                    .style(theme::clean_button_style(self.is_flip, false))
-                    .padding([5, 12]),
-                // Freeze Frame
-                button(text(if self.is_frozen { "▶ Resume [Space]" } else { "⏸ Freeze [Space]" }).size(12))
-                    .on_press(Message::ToggleFreeze)
-                    .style(theme::clean_button_style(self.is_frozen, false))
-                    .padding([5, 12]),
-                // Rotate
-                button(text(format!("↻ {}° [R]", self.rotation_deg)).size(12))
+                // Mirror / Flip Icon Button
+                render_icon_btn(
+                    icons::ICON_FLIP,
+                    "Mirror / Flip [F]",
+                    Message::ToggleFlip,
+                    self.is_flip,
+                    false,
+                    tooltip::Position::Top,
+                ),
+                // Freeze Frame Icon Button
+                render_icon_btn(
+                    if self.is_frozen {
+                        icons::ICON_PLAY
+                    } else {
+                        icons::ICON_PAUSE
+                    },
+                    if self.is_frozen {
+                        "Resume Live [Space]"
+                    } else {
+                        "Freeze Frame [Space]"
+                    },
+                    Message::ToggleFreeze,
+                    self.is_frozen,
+                    false,
+                    tooltip::Position::Top,
+                ),
+                // Rotate Icon Button with Angle Badge
+                tooltip(
+                    button(
+                        row![
+                            render_svg(icons::ICON_ROTATE, 15.0, self.rotation_deg > 0, false),
+                            text(format!("{}°", self.rotation_deg)).size(11),
+                        ]
+                        .spacing(4)
+                        .align_y(Alignment::Center),
+                    )
                     .on_press(Message::RotateNext)
                     .style(theme::clean_button_style(self.rotation_deg > 0, false))
-                    .padding([5, 12]),
-                // Zoom
+                    .padding([5, 8]),
+                    container(text("Rotate 90° [R]").size(11))
+                        .padding([3, 7])
+                        .style(theme::tooltip_style),
+                    tooltip::Position::Top,
+                ),
+                // Zoom Controls
                 row![
-                    button(text("−").size(12))
-                        .on_press(Message::ZoomOut)
-                        .style(theme::clean_button_style(false, false))
-                        .padding([4, 8]),
+                    render_icon_btn(
+                        icons::ICON_ZOOM_OUT,
+                        "Zoom Out [-]",
+                        Message::ZoomOut,
+                        false,
+                        false,
+                        tooltip::Position::Top,
+                    ),
                     text(format!("{:.1}x", self.zoom_level))
-                        .size(12)
+                        .size(11)
                         .color(theme::COLOR_TEXT),
-                    button(text("+").size(12))
-                        .on_press(Message::ZoomIn)
-                        .style(theme::clean_button_style(false, false))
-                        .padding([4, 8]),
+                    render_icon_btn(
+                        icons::ICON_ZOOM_IN,
+                        "Zoom In [=]",
+                        Message::ZoomIn,
+                        false,
+                        false,
+                        tooltip::Position::Top,
+                    ),
                 ]
-                .spacing(4)
+                .spacing(3)
                 .align_y(Alignment::Center),
-                // Fullscreen toggle in toolbar
-                button(text(if self.is_fullscreen { "🗗 Exit Fullscreen [F11]" } else { "⛶ Fullscreen [F11]" }).size(12))
-                    .on_press(Message::ToggleFullscreen)
-                    .style(theme::clean_button_style(self.is_fullscreen, false))
-                    .padding([5, 12]),
+                // Fullscreen Icon Button
+                render_icon_btn(
+                    if self.is_fullscreen {
+                        icons::ICON_MINIMIZE_2
+                    } else {
+                        icons::ICON_MAXIMIZE
+                    },
+                    if self.is_fullscreen {
+                        "Exit Fullscreen [F11]"
+                    } else {
+                        "Fullscreen [F11]"
+                    },
+                    Message::ToggleFullscreen,
+                    self.is_fullscreen,
+                    false,
+                    tooltip::Position::Top,
+                ),
                 Space::new().width(Fill),
                 // Status message
                 text(&self.status_text)
                     .size(11)
                     .color(theme::COLOR_TEXT_MUTED),
-                // Corner resize affordance indicator
-                text("◿").size(10).color(theme::COLOR_BORDER_ACTIVE),
+                // Bottom-right Settings Gear Icon Button
+                render_icon_btn(
+                    icons::ICON_SETTINGS,
+                    "Settings [S]",
+                    Message::ToggleSettings,
+                    self.show_settings,
+                    false,
+                    tooltip::Position::Top,
+                ),
             ]
-            .spacing(10)
+            .spacing(8)
             .align_y(Alignment::Center)
-            .padding([6, 12]),
+            .padding([5, 10]),
         )
         .style(theme::controls_panel_style)
         .width(Fill);
@@ -497,8 +616,99 @@ impl AutoCamApp {
             .into()
     }
 
+    /// Settings modal panel
+    fn view_settings_panel(&self) -> Element<'_, Message> {
+        let header = row![
+            render_svg(icons::ICON_SETTINGS, 16.0, true, false),
+            text("Settings").size(14).color(theme::COLOR_TEXT),
+            Space::new().width(Fill),
+            render_icon_btn(
+                icons::ICON_CLOSE,
+                "Close Settings [Esc]",
+                Message::ToggleSettings,
+                false,
+                true,
+                tooltip::Position::Bottom,
+            ),
+        ]
+        .align_y(Alignment::Center);
+
+        let dev_section = column![
+            text("Camera Device").size(11).color(theme::COLOR_TEXT_MUTED),
+            pick_list(
+                self.available_devices.clone(),
+                self.selected_device.clone(),
+                Message::DeviceSelected,
+            )
+            .text_size(12)
+            .padding([4, 8])
+            .width(Fill),
+        ]
+        .spacing(4);
+
+        let res_section = column![
+            text("Resolution").size(11).color(theme::COLOR_TEXT_MUTED),
+            row![
+                button(text("720p HD").size(11))
+                    .on_press(Message::SetResolution(VideoResolution::Hd720p))
+                    .style(theme::clean_button_style(
+                        self.resolution == VideoResolution::Hd720p,
+                        false
+                    ))
+                    .padding([4, 12]),
+                button(text("1080p FHD").size(11))
+                    .on_press(Message::SetResolution(VideoResolution::Fhd1080p))
+                    .style(theme::clean_button_style(
+                        self.resolution == VideoResolution::Fhd1080p,
+                        false
+                    ))
+                    .padding([4, 12]),
+            ]
+            .spacing(8),
+        ]
+        .spacing(4);
+
+        let shortcuts_guide = column![
+            text("Shortcuts").size(11).color(theme::COLOR_TEXT_MUTED),
+            container(
+                column![
+                    shortcut_row("Space", "Freeze / Resume live feed"),
+                    shortcut_row("F", "Mirror / Flip camera"),
+                    shortcut_row("R", "Rotate 90 degrees"),
+                    shortcut_row("P", "Toggle Picture-in-Picture"),
+                    shortcut_row("F11", "Toggle Fullscreen"),
+                    shortcut_row("+ / -", "Zoom in / Zoom out"),
+                    shortcut_row("S", "Toggle Settings"),
+                ]
+                .spacing(5),
+            )
+            .padding(10)
+            .style(theme::settings_inner_box_style)
+            .width(Fill),
+        ]
+        .spacing(4);
+
+        let footer = row![
+            text(format!("Engine: tiny-skia • Status: {}", self.status_text))
+                .size(10)
+                .color(theme::COLOR_TEXT_MUTED),
+        ];
+
+        column![
+            header,
+            Space::new().height(Length::Fixed(6.0)),
+            dev_section,
+            res_section,
+            shortcuts_guide,
+            Space::new().height(Length::Fixed(4.0)),
+            footer,
+        ]
+        .spacing(10)
+        .padding(16)
+        .into()
+    }
+
     /// Picture-in-Picture Mode: Compact, borderless, AlwaysOnTop.
-    /// Uses stack layout so hovering overlay controls NEVER shrinks or shifts the video feed.
     fn view_pip(&self) -> Element<'_, Message> {
         let video_content: Element<'_, Message> = if let Some(ref handle) = self.image_handle {
             image(handle)
@@ -518,7 +728,7 @@ impl AutoCamApp {
 
         let mut layers: Vec<Element<'_, Message>> = vec![video_content];
 
-        // Overlay header floats on top of the video without modifying video geometry
+        // Floating header appears on hover without displacing video feed
         if self.pip_hovered {
             let overlay_header: Element<'_, Message> = mouse_area(
                 container(
@@ -526,26 +736,50 @@ impl AutoCamApp {
                         pip_logo,
                         text("AutoCam").size(11).color(theme::COLOR_TEXT_MUTED),
                         Space::new().width(Fill),
-                        button(text(if self.is_frozen { "▶" } else { "⏸" }).size(11))
-                            .on_press(Message::ToggleFreeze)
-                            .style(theme::clean_button_style(self.is_frozen, false))
-                            .padding([2, 6]),
-                        button(text("⇄").size(11))
-                            .on_press(Message::ToggleFlip)
-                            .style(theme::clean_button_style(self.is_flip, false))
-                            .padding([2, 6]),
-                        button(text("Exit PiP").size(11))
-                            .on_press(Message::TogglePip)
-                            .style(theme::clean_button_style(false, false))
-                            .padding([2, 8]),
-                        button(text("✕").size(11))
-                            .on_press(Message::CloseWindow)
-                            .style(theme::clean_button_style(false, true))
-                            .padding([2, 6]),
+                        render_icon_btn(
+                            if self.is_frozen {
+                                icons::ICON_PLAY
+                            } else {
+                                icons::ICON_PAUSE
+                            },
+                            if self.is_frozen {
+                                "Resume"
+                            } else {
+                                "Freeze"
+                            },
+                            Message::ToggleFreeze,
+                            self.is_frozen,
+                            false,
+                            tooltip::Position::Bottom,
+                        ),
+                        render_icon_btn(
+                            icons::ICON_FLIP,
+                            "Flip",
+                            Message::ToggleFlip,
+                            self.is_flip,
+                            false,
+                            tooltip::Position::Bottom,
+                        ),
+                        render_icon_btn(
+                            icons::ICON_PIP,
+                            "Exit PiP",
+                            Message::TogglePip,
+                            false,
+                            false,
+                            tooltip::Position::Bottom,
+                        ),
+                        render_icon_btn(
+                            icons::ICON_CLOSE,
+                            "Close",
+                            Message::CloseWindow,
+                            false,
+                            true,
+                            tooltip::Position::Bottom,
+                        ),
                     ]
-                    .spacing(5)
+                    .spacing(4)
                     .align_y(Alignment::Center)
-                    .padding([4, 8]),
+                    .padding([3, 6]),
                 )
                 .style(theme::pip_overlay_title_bar_style)
                 .width(Fill),
@@ -568,6 +802,69 @@ impl AutoCamApp {
         .on_exit(Message::PipMouseExit)
         .into()
     }
+}
+
+/// Helper function to render a clean shortcut guide row
+fn shortcut_row<'a>(key_name: &'static str, description: &'static str) -> Element<'a, Message> {
+    row![
+        container(text(key_name).size(10).color(theme::COLOR_TEXT))
+            .padding([2, 5])
+            .style(theme::tooltip_style),
+        text(description).size(11).color(theme::COLOR_TEXT_MUTED),
+    ]
+    .spacing(8)
+    .align_y(Alignment::Center)
+    .into()
+}
+
+/// Helper function to render SVG icon element
+fn render_svg<'a>(
+    svg_str: &'static str,
+    size: f32,
+    is_active: bool,
+    is_danger: bool,
+) -> Element<'a, Message> {
+    let icon_color = if is_danger {
+        theme::COLOR_DANGER
+    } else if is_active {
+        theme::COLOR_TEXT
+    } else {
+        theme::COLOR_TEXT_MUTED
+    };
+
+    svg(svg::Handle::from_memory(svg_str.as_bytes()))
+        .width(Length::Fixed(size))
+        .height(Length::Fixed(size))
+        .style(move |_theme, _status| svg::Style {
+            color: Some(icon_color),
+        })
+        .into()
+}
+
+/// Helper function to create an icon button with hover tooltip
+fn render_icon_btn<'a>(
+    svg_str: &'static str,
+    hint: &'static str,
+    on_press: Message,
+    is_active: bool,
+    is_danger: bool,
+    tooltip_pos: tooltip::Position,
+) -> Element<'a, Message> {
+    let icon_el = render_svg(svg_str, 15.0, is_active, is_danger);
+
+    let btn = button(icon_el)
+        .on_press(on_press)
+        .style(theme::clean_button_style(is_active, is_danger))
+        .padding([5, 7]);
+
+    tooltip(
+        btn,
+        container(text(hint).size(11))
+            .padding([3, 7])
+            .style(theme::tooltip_style),
+        tooltip_pos,
+    )
+    .into()
 }
 
 /// Wraps window content with non-blocking edge/corner resize zones for borderless window dragging
