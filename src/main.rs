@@ -3,7 +3,9 @@ mod theme;
 
 use camera::{CameraControl, CameraDeviceInfo, CameraManager, VideoResolution};
 use iced::keyboard::{self, key, Key};
-use iced::widget::{button, column, container, image, mouse_area, pick_list, row, text, Space};
+use iced::widget::{
+    button, column, container, image, mouse_area, pick_list, row, stack, text, Space,
+};
 use iced::window;
 use iced::{Alignment, ContentFit, Element, Fill, Length, Subscription, Task};
 use std::time::Duration;
@@ -19,6 +21,7 @@ pub struct AutoCamApp {
     pip_hovered: bool,
     is_flip: bool,
     is_frozen: bool,
+    is_fullscreen: bool,
     rotation_deg: u16,
     zoom_level: f32,
     image_handle: Option<image::Handle>,
@@ -35,6 +38,7 @@ pub enum Message {
     ToggleResolution,
     ToggleFlip,
     ToggleFreeze,
+    ToggleFullscreen,
     RotateNext,
     ZoomIn,
     ZoomOut,
@@ -55,6 +59,8 @@ impl AutoCamApp {
 
         let camera_manager = if let Some(ref dev) = selected_device {
             let (mgr, _) = CameraManager::start(dev.index, resolution);
+            // Flip is enabled by default to mirror the camera view naturally
+            mgr.send(CameraControl::SetFlip(true));
             Some(mgr)
         } else {
             None
@@ -74,8 +80,9 @@ impl AutoCamApp {
                 resolution,
                 is_pip: false,
                 pip_hovered: false,
-                is_flip: false,
+                is_flip: true, // Enabled by default to eliminate camera orientation confusion
                 is_frozen: false,
+                is_fullscreen: false,
                 rotation_deg: 0,
                 zoom_level: 1.0,
                 image_handle: None,
@@ -114,6 +121,7 @@ impl AutoCamApp {
                 if let keyboard::Event::KeyPressed { key, .. } = event {
                     match key {
                         Key::Named(key::Named::Space) => return self.update(Message::ToggleFreeze),
+                        Key::Named(key::Named::F11) => return self.update(Message::ToggleFullscreen),
                         Key::Character(ref ch) => {
                             if ch.eq_ignore_ascii_case("f") {
                                 return self.update(Message::ToggleFlip);
@@ -137,8 +145,10 @@ impl AutoCamApp {
                 self.selected_device = Some(device.clone());
                 if let Some(ref mgr) = self.camera_manager {
                     mgr.send(CameraControl::SwitchDevice(device.index));
+                    mgr.send(CameraControl::SetFlip(self.is_flip));
                 } else {
                     let (mgr, _) = CameraManager::start(device.index, self.resolution);
+                    mgr.send(CameraControl::SetFlip(self.is_flip));
                     self.camera_manager = Some(mgr);
                 }
                 self.status_text = format!("Switched to {}", device.name);
@@ -171,11 +181,21 @@ impl AutoCamApp {
                     mgr.send(CameraControl::SetFreeze(self.is_frozen));
                 }
                 self.status_text = if self.is_frozen {
-                    "Frame Frozen [Press Space to Resume]".to_string()
+                    "Frame Frozen [Space to Resume]".to_string()
                 } else {
                     "Live Streaming".to_string()
                 };
                 Task::none()
+            }
+
+            Message::ToggleFullscreen => {
+                self.is_fullscreen = !self.is_fullscreen;
+                let mode = if self.is_fullscreen {
+                    window::Mode::Fullscreen
+                } else {
+                    window::Mode::Windowed
+                };
+                window::latest().and_then(move |id| window::set_mode(id, mode))
             }
 
             Message::RotateNext => {
@@ -277,14 +297,14 @@ impl AutoCamApp {
             .width(Length::Fixed(18.0))
             .height(Length::Fixed(18.0));
 
-        // 1. Draggable Top Title Bar (Flush with window edges)
+        // 1. Draggable Top Title Bar (Flush with window edges, strict monochrome)
         let title_bar = mouse_area(
             container(
                 row![
                     app_logo,
-                    text("AutoCam").size(14),
+                    text("AutoCam").size(13).color(theme::COLOR_TEXT),
                     text("Teaching").size(11).color(theme::COLOR_TEXT_MUTED),
-                    Space::new().width(Length::Fixed(12.0)),
+                    Space::new().width(Length::Fixed(10.0)),
                     // Camera device picker
                     pick_list(
                         self.available_devices.clone(),
@@ -298,30 +318,35 @@ impl AutoCamApp {
                         .on_press(Message::ToggleResolution)
                         .style(theme::clean_button_style(false, false))
                         .padding([4, 10]),
-                    // Refresh Device Button
-                    button(text("Refresh").size(11))
+                    // Refresh Device Button (Icon-focused)
+                    button(text("⟳").size(12))
                         .on_press(Message::RefreshDevices)
                         .style(theme::clean_button_style(false, false))
-                        .padding([4, 10]),
+                        .padding([3, 8]),
                     Space::new().width(Fill),
                     // PiP Switcher Button
-                    button(text("PiP [P]").size(11))
+                    button(text("◱ PiP [P]").size(11))
                         .on_press(Message::TogglePip)
-                        .style(theme::clean_button_style(true, false))
-                        .padding([4, 12]),
+                        .style(theme::clean_button_style(self.is_pip, false))
+                        .padding([4, 10]),
+                    // Fullscreen Button
+                    button(text(if self.is_fullscreen { "🗗" } else { "⛶" }).size(12))
+                        .on_press(Message::ToggleFullscreen)
+                        .style(theme::clean_button_style(self.is_fullscreen, false))
+                        .padding([3, 8]),
                     // Minimize and Close
-                    button(text("–").size(13))
+                    button(text("–").size(12))
                         .on_press(Message::MinimizeWindow)
                         .style(theme::clean_button_style(false, false))
-                        .padding([2, 8]),
-                    button(text("✕").size(13))
+                        .padding([3, 8]),
+                    button(text("✕").size(12))
                         .on_press(Message::CloseWindow)
                         .style(theme::clean_button_style(false, true))
-                        .padding([2, 8]),
+                        .padding([3, 8]),
                 ]
-                .spacing(8)
+                .spacing(6)
                 .align_y(Alignment::Center)
-                .padding([8, 12]),
+                .padding([6, 12]),
             )
             .style(theme::title_bar_style)
             .width(Fill),
@@ -355,49 +380,54 @@ impl AutoCamApp {
             .width(Fill)
             .height(Fill);
 
-        // 3. Circuit Teaching Controls Toolbar
+        // 3. Circuit Teaching Controls Toolbar (Icon-focused, strict monochrome)
         let toolbar = container(
             row![
                 // Flip / Mirror
-                button(text(if self.is_flip { "Flip: On [F]" } else { "Flip [F]" }).size(12))
+                button(text("⇄ Mirror [F]").size(12))
                     .on_press(Message::ToggleFlip)
                     .style(theme::clean_button_style(self.is_flip, false))
-                    .padding([6, 14]),
+                    .padding([5, 12]),
                 // Freeze Frame
-                button(text(if self.is_frozen { "Resume [Space]" } else { "Freeze [Space]" }).size(12))
+                button(text(if self.is_frozen { "▶ Resume [Space]" } else { "⏸ Freeze [Space]" }).size(12))
                     .on_press(Message::ToggleFreeze)
                     .style(theme::clean_button_style(self.is_frozen, false))
-                    .padding([6, 14]),
+                    .padding([5, 12]),
                 // Rotate
-                button(text(format!("Rotate: {}° [R]", self.rotation_deg)).size(12))
+                button(text(format!("↻ {}° [R]", self.rotation_deg)).size(12))
                     .on_press(Message::RotateNext)
                     .style(theme::clean_button_style(self.rotation_deg > 0, false))
-                    .padding([6, 14]),
+                    .padding([5, 12]),
                 // Zoom
                 row![
-                    button(text("–").size(12))
+                    button(text("−").size(12))
                         .on_press(Message::ZoomOut)
                         .style(theme::clean_button_style(false, false))
-                        .padding([4, 10]),
+                        .padding([4, 8]),
                     text(format!("{:.1}x", self.zoom_level))
                         .size(12)
                         .color(theme::COLOR_TEXT),
                     button(text("+").size(12))
                         .on_press(Message::ZoomIn)
                         .style(theme::clean_button_style(false, false))
-                        .padding([4, 10]),
+                        .padding([4, 8]),
                 ]
-                .spacing(6)
+                .spacing(4)
                 .align_y(Alignment::Center),
+                // Fullscreen toggle in toolbar
+                button(text(if self.is_fullscreen { "🗗 Exit Fullscreen [F11]" } else { "⛶ Fullscreen [F11]" }).size(12))
+                    .on_press(Message::ToggleFullscreen)
+                    .style(theme::clean_button_style(self.is_fullscreen, false))
+                    .padding([5, 12]),
                 Space::new().width(Fill),
                 // Status message
                 text(&self.status_text)
                     .size(11)
                     .color(theme::COLOR_TEXT_MUTED),
             ]
-            .spacing(12)
+            .spacing(10)
             .align_y(Alignment::Center)
-            .padding([8, 14]),
+            .padding([6, 12]),
         )
         .style(theme::controls_panel_style)
         .width(Fill);
@@ -413,7 +443,8 @@ impl AutoCamApp {
             .into()
     }
 
-    /// Picture-in-Picture Mode: Compact, borderless, AlwaysOnTop, auto-hide overlay controls
+    /// Picture-in-Picture Mode: Compact, borderless, AlwaysOnTop.
+    /// Uses stack layout so hovering overlay controls NEVER shrinks or shifts the video feed.
     fn view_pip(&self) -> Element<'_, Message> {
         let video_content: Element<'_, Message> = if let Some(ref handle) = self.image_handle {
             image(handle)
@@ -431,27 +462,34 @@ impl AutoCamApp {
             .width(Length::Fixed(14.0))
             .height(Length::Fixed(14.0));
 
-        let overlay_header: Element<'_, Message> = if self.pip_hovered {
-            mouse_area(
+        let mut layers: Vec<Element<'_, Message>> = vec![video_content];
+
+        // Overlay header floats on top of the video without modifying video geometry
+        if self.pip_hovered {
+            let overlay_header: Element<'_, Message> = mouse_area(
                 container(
                     row![
                         pip_logo,
-                        text("AutoCam").size(11),
+                        text("AutoCam").size(11).color(theme::COLOR_TEXT_MUTED),
                         Space::new().width(Fill),
-                        button(text(if self.is_frozen { "▶" } else { "❚❚" }).size(11))
+                        button(text(if self.is_frozen { "▶" } else { "⏸" }).size(11))
                             .on_press(Message::ToggleFreeze)
                             .style(theme::clean_button_style(self.is_frozen, false))
                             .padding([2, 6]),
+                        button(text("⇄").size(11))
+                            .on_press(Message::ToggleFlip)
+                            .style(theme::clean_button_style(self.is_flip, false))
+                            .padding([2, 6]),
                         button(text("Exit PiP").size(11))
                             .on_press(Message::TogglePip)
-                            .style(theme::clean_button_style(true, false))
+                            .style(theme::clean_button_style(false, false))
                             .padding([2, 8]),
                         button(text("✕").size(11))
                             .on_press(Message::CloseWindow)
                             .style(theme::clean_button_style(false, true))
                             .padding([2, 6]),
                     ]
-                    .spacing(6)
+                    .spacing(5)
                     .align_y(Alignment::Center)
                     .padding([4, 8]),
                 )
@@ -459,12 +497,12 @@ impl AutoCamApp {
                 .width(Fill),
             )
             .on_press(Message::DragWindow)
-            .into()
-        } else {
-            Space::new().height(Length::Shrink).into()
-        };
+            .into();
 
-        let pip_stack = column![overlay_header, video_content,].width(Fill).height(Fill);
+            layers.push(overlay_header);
+        }
+
+        let pip_stack = stack(layers).width(Fill).height(Fill);
 
         mouse_area(
             container(pip_stack)

@@ -3,16 +3,16 @@ use iced::widget::button;
 use iced::widget::container;
 use iced::{Background, Border, Color, Shadow, Theme};
 
-// Semantic Color Tokens from clean-ui-design
-pub const COLOR_BG: Color = Color::from_rgb(0.070, 0.070, 0.078); // #121214
-pub const COLOR_SURFACE: Color = Color::from_rgb(0.102, 0.102, 0.114); // #1a1a1d
-pub const COLOR_SURFACE_MUTED: Color = Color::from_rgb(0.137, 0.137, 0.153); // #232327
-pub const COLOR_BORDER: Color = Color::from_rgb(0.180, 0.180, 0.200); // #2e2e33
-pub const COLOR_TEXT: Color = Color::from_rgb(0.925, 0.925, 0.937); // #ececef
-pub const COLOR_TEXT_MUTED: Color = Color::from_rgb(0.631, 0.631, 0.667); // #a1a1aa
-pub const COLOR_PRIMARY: Color = Color::from_rgb(0.231, 0.510, 0.965); // #3b82f6
-pub const COLOR_PRIMARY_BG: Color = Color::from_rgb(0.118, 0.227, 0.450);
-pub const COLOR_DANGER: Color = Color::from_rgb(0.937, 0.267, 0.267); // #ef4444
+// Semantic Monochrome Tokens from clean-ui-design (Strict black & white / zinc)
+pub const COLOR_BG: Color = Color::from_rgb(0.040, 0.040, 0.045);         // #0a0a0b (Zinc 950 deep)
+pub const COLOR_SURFACE: Color = Color::from_rgb(0.080, 0.080, 0.090);    // #141417 (Zinc 900)
+pub const COLOR_SURFACE_MUTED: Color = Color::from_rgb(0.140, 0.140, 0.155); // #242428 (Zinc 800)
+pub const COLOR_ACTIVE_BG: Color = Color::from_rgb(0.200, 0.200, 0.220); // #333338 (Zinc 700)
+pub const COLOR_BORDER: Color = Color::from_rgb(0.180, 0.180, 0.200);     // #2e2e33 (Subtle 1px border)
+pub const COLOR_BORDER_ACTIVE: Color = Color::from_rgb(0.380, 0.380, 0.410); // #616169 (Bright border)
+pub const COLOR_TEXT: Color = Color::from_rgb(0.960, 0.960, 0.970);       // #f5f5f7 (Crisp white)
+pub const COLOR_TEXT_MUTED: Color = Color::from_rgb(0.620, 0.620, 0.660); // #9e9ea8 (Subtle zinc text)
+pub const COLOR_DANGER: Color = Color::from_rgb(0.937, 0.267, 0.267);     // #ef4444 (Close hover only)
 
 // Radius Tokens
 pub const RADIUS_SM: Radius = Radius {
@@ -53,7 +53,7 @@ pub fn title_bar_style(_theme: &Theme) -> container::Style {
 pub fn pip_overlay_title_bar_style(_theme: &Theme) -> container::Style {
     container::Style {
         background: Some(Background::Color(Color::from_rgba(
-            0.07, 0.07, 0.08, 0.90,
+            0.06, 0.06, 0.07, 0.88,
         ))),
         border: Border {
             color: COLOR_BORDER,
@@ -101,19 +101,19 @@ pub fn clean_button_style(
                 _ => (
                     Color::TRANSPARENT,
                     COLOR_BORDER,
-                    COLOR_DANGER,
+                    COLOR_TEXT_MUTED,
                 ),
             }
         } else if is_active {
             match status {
                 button::Status::Hovered => (
-                    COLOR_PRIMARY,
-                    COLOR_PRIMARY,
-                    Color::WHITE,
+                    COLOR_ACTIVE_BG,
+                    COLOR_BORDER_ACTIVE,
+                    COLOR_TEXT,
                 ),
                 _ => (
-                    COLOR_PRIMARY_BG,
-                    COLOR_PRIMARY,
+                    COLOR_SURFACE_MUTED,
+                    COLOR_BORDER_ACTIVE,
                     COLOR_TEXT,
                 ),
             }
@@ -121,7 +121,7 @@ pub fn clean_button_style(
             match status {
                 button::Status::Hovered => (
                     COLOR_SURFACE_MUTED,
-                    COLOR_BORDER,
+                    COLOR_BORDER_ACTIVE,
                     COLOR_TEXT,
                 ),
                 _ => (

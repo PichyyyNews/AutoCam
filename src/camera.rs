@@ -169,7 +169,7 @@ fn run_capture_loop(
     mut current_res: VideoResolution,
 ) {
     let mut camera = open_camera(current_device, current_res);
-    let mut is_flip = false;
+    let mut is_flip = true; // Enabled by default to match natural mirror view
     let mut rotation_deg = 0u16;
     let mut zoom_level = 1.0f32;
     let mut is_frozen = false;
