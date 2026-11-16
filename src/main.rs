@@ -204,6 +204,8 @@ fn scan_captures_folder() -> Vec<MediaItem> {
 
             let thumbnail_handle = if is_photo {
                 std::fs::read(&path).ok().map(image::Handle::from_bytes)
+            } else if is_video {
+                recorder::extract_first_frame_jpeg(&path).map(image::Handle::from_bytes)
             } else {
                 None
             };
@@ -366,6 +368,7 @@ pub enum Message {
     AlbumHovered(bool),
     SetAlbumFilter(AlbumFilter),
     RefreshAlbum,
+    PlayVideo(PathBuf),
     MediaHovered(Option<usize>),
     ToggleMediaMenu(Option<usize>),
     OpenInExplorer(PathBuf),
@@ -711,6 +714,21 @@ impl AutoCamApp {
                 Task::none()
             }
 
+            Message::PlayVideo(path) => {
+                let path_str = path.to_string_lossy().to_string();
+                let _ = std::process::Command::new("cmd")
+                    .args(["/C", "start", "", &path_str])
+                    .spawn();
+                self.snapshot_toast = Some((
+                    format!("Playing: {}", path.file_name().unwrap_or_default().to_string_lossy()),
+                    Instant::now(),
+                ));
+                Task::perform(
+                    tokio::time::sleep(Duration::from_millis(1500)),
+                    |_| Message::ClearSnapshotToast,
+                )
+            }
+
             Message::MediaHovered(idx) => {
                 self.hovered_media_idx = idx;
                 Task::none()
@@ -888,7 +906,7 @@ impl AutoCamApp {
                             self.recording_elapsed_secs = 0;
                             self.snapshot_toast = Some(("Recording started...".to_string(), Instant::now()));
                             return Task::perform(
-                                tokio::time::sleep(Duration::from_millis(1200)),
+                                tokio::time::sleep(Duration::from_millis(600)),
                                 |_| Message::ClearSnapshotToast,
                             );
                         }
@@ -1490,11 +1508,13 @@ impl AutoCamApp {
         let title_bar = mouse_area(
             container(
                 row![
+                    // Group 1: Brand / Logo
                     app_logo,
                     text("AutoCam")
                         .size(13)
                         .color(theme::COLOR_TEXT),
-                    Space::new().width(Length::Fixed(12.0)),
+                    toolbar_divider(),
+                    // Group 2: Camera Stream Devices & Resolution
                     pick_list(
                         self.available_devices.clone(),
                         self.selected_device.clone(),
@@ -1517,8 +1537,8 @@ impl AutoCamApp {
                         false,
                         tooltip::Position::Bottom,
                     ),
-                    Space::new().width(Length::Fixed(6.0)),
-                    // Microphone Device Selector & Mute Toggle
+                    toolbar_divider(),
+                    // Group 3: Microphone Device & Mute Toggle
                     pick_list(
                         self.available_audio_devices.clone(),
                         self.selected_audio_device.clone(),
@@ -1544,7 +1564,7 @@ impl AutoCamApp {
                         tooltip::Position::Bottom,
                     ),
                     Space::new().width(Fill),
-                    // PiP Switcher
+                    // Group 4: Window Controls
                     render_icon_btn(
                         icons::ICON_PIP,
                         "Picture-in-Picture [P]",
@@ -1553,7 +1573,7 @@ impl AutoCamApp {
                         false,
                         tooltip::Position::Bottom,
                     ),
-                    // Fullscreen
+                    toolbar_divider(),
                     render_icon_btn(
                         if self.is_fullscreen {
                             icons::ICON_MINIMIZE_2
@@ -1566,7 +1586,6 @@ impl AutoCamApp {
                         false,
                         tooltip::Position::Bottom,
                     ),
-                    // Minimize and Close
                     render_icon_btn(
                         icons::ICON_MINUS,
                         "Minimize",
@@ -1793,14 +1812,27 @@ impl AutoCamApp {
         // 3.2 Bottom-Right Album Button with Floating Thumbnail Hover Preview (No Text, No Layout Shift)
         let tooltip_preview: Element<'_, Message> = if let Some(ref item) = self.latest_capture {
             if let Some(ref handle) = item.thumbnail_handle {
-                container(
-                    image(handle)
-                        .content_fit(ContentFit::Cover)
-                        .width(Length::Fixed(120.0))
-                        .height(Length::Fixed(80.0)),
-                )
-                .style(theme::tooltip_image_preview_style)
-                .into()
+                let img = image(handle)
+                    .content_fit(ContentFit::Cover)
+                    .width(Length::Fixed(128.0))
+                    .height(Length::Fixed(72.0));
+
+                if item.kind == MediaKind::Video {
+                    container(
+                        stack![
+                            img,
+                            container(render_svg(icons::ICON_PLAY, 16.0, true, false)).center(Fill),
+                        ]
+                        .width(Length::Fixed(128.0))
+                        .height(Length::Fixed(72.0)),
+                    )
+                    .style(theme::tooltip_image_preview_style)
+                    .into()
+                } else {
+                    container(img)
+                        .style(theme::tooltip_image_preview_style)
+                        .into()
+                }
             } else if item.kind == MediaKind::Video {
                 container(
                     column![
@@ -1838,9 +1870,19 @@ impl AutoCamApp {
 
         let toolbar = container(
             row![
-                // 1. Record Video Button (Bottom-Left)
+                // Group 1: Media Capture (Record Video & Still Snapshot)
                 record_btn,
-                // 2. Mirror / Flip
+                render_icon_btn(
+                    icons::ICON_CAMERA,
+                    "Take Snapshot [C]",
+                    Message::CaptureSnapshot,
+                    false,
+                    false,
+                    tooltip::Position::Top,
+                ),
+                toolbar_divider(),
+
+                // Group 2: Camera Stream & Orientation
                 render_icon_btn(
                     icons::ICON_FLIP,
                     "Mirror / Flip [F]",
@@ -1849,7 +1891,6 @@ impl AutoCamApp {
                     false,
                     tooltip::Position::Top,
                 ),
-                // 3. Freeze / Play
                 render_icon_btn(
                     if self.is_frozen {
                         icons::ICON_PLAY
@@ -1866,7 +1907,6 @@ impl AutoCamApp {
                     false,
                     tooltip::Position::Top,
                 ),
-                // 4. Rotate Icon Button with Angle Badge
                 tooltip(
                     button(
                         row![
@@ -1884,7 +1924,9 @@ impl AutoCamApp {
                         .style(theme::tooltip_style),
                     tooltip::Position::Top,
                 ),
-                // 5. Zoom Controls
+                toolbar_divider(),
+
+                // Group 3: Optics, Zoom & Exposure
                 row![
                     render_icon_btn(
                         icons::ICON_ZOOM_OUT,
@@ -1908,7 +1950,6 @@ impl AutoCamApp {
                 ]
                 .spacing(3)
                 .align_y(Alignment::Center),
-                // 6. Auto Focus Quick Toggle
                 render_icon_btn(
                     icons::ICON_FOCUS,
                     if self.auto_focus {
@@ -1921,7 +1962,6 @@ impl AutoCamApp {
                     false,
                     tooltip::Position::Top,
                 ),
-                // 7. Auto EV Quick Toggle
                 render_icon_btn(
                     icons::ICON_EV,
                     if self.auto_ev {
@@ -1934,7 +1974,9 @@ impl AutoCamApp {
                     false,
                     tooltip::Position::Top,
                 ),
-                // 8. Grid Alignment Overlay
+                toolbar_divider(),
+
+                // Group 4: Overlays & AI Tracking
                 render_icon_btn(
                     icons::ICON_GRID,
                     self.grid_mode.label(),
@@ -1943,16 +1985,6 @@ impl AutoCamApp {
                     false,
                     tooltip::Position::Top,
                 ),
-                // 9. Snapshot Still Capture
-                render_icon_btn(
-                    icons::ICON_CAMERA,
-                    "Take Snapshot [C]",
-                    Message::CaptureSnapshot,
-                    false,
-                    false,
-                    tooltip::Position::Top,
-                ),
-                // 10. Presenter Face Tracking HUD
                 render_icon_btn(
                     icons::ICON_FACE,
                     if self.face_detection {
@@ -1965,7 +1997,9 @@ impl AutoCamApp {
                     false,
                     tooltip::Position::Top,
                 ),
-                // 11. Fullscreen Icon Button
+                toolbar_divider(),
+
+                // Group 5: View Mode
                 render_icon_btn(
                     if self.is_fullscreen {
                         icons::ICON_MINIMIZE_2
@@ -1982,10 +2016,12 @@ impl AutoCamApp {
                     false,
                     tooltip::Position::Top,
                 ),
+
                 Space::new().width(Fill),
-                // 12. Bottom-right Album Preview & Window Opener
+
+                // Group 6: Gallery & Settings
                 album_btn,
-                // 13. Settings Window Opener Button
+                toolbar_divider(),
                 render_icon_btn(
                     icons::ICON_SETTINGS,
                     "Camera Engine & Driver Settings [S]",
@@ -2146,24 +2182,78 @@ impl AutoCamApp {
                                     .height(Fill)
                                     .into()
                             } else {
-                                container(render_svg(icons::ICON_ALBUM, 24.0, false, false))
+                                container(render_svg(icons::ICON_ALBUM, 28.0, false, false))
                                     .center(Fill)
                                     .into()
                             }
                         }
                         MediaKind::Video => {
-                            container(
-                                column![
-                                    render_svg(icons::ICON_VIDEO, 28.0, true, false),
-                                    Space::new().height(Length::Fixed(4.0)),
-                                    text(format_size(item.size_bytes))
-                                        .size(10)
-                                        .color(theme::COLOR_TEXT_MUTED),
-                                ]
-                                .align_x(Alignment::Center),
+                            let video_thumb: Element<'_, Message> = if let Some(ref handle) = item.thumbnail_handle {
+                                image(handle)
+                                    .content_fit(ContentFit::Cover)
+                                    .width(Fill)
+                                    .height(Fill)
+                                    .into()
+                            } else {
+                                container(
+                                    column![
+                                        render_svg(icons::ICON_VIDEO, 28.0, true, false),
+                                        Space::new().height(Length::Fixed(4.0)),
+                                        text(format_size(item.size_bytes))
+                                            .size(10)
+                                            .color(theme::COLOR_TEXT_MUTED),
+                                    ]
+                                    .align_x(Alignment::Center),
+                                )
+                                .center(Fill)
+                                .into()
+                            };
+
+                            // Centered semi-transparent play badge
+                            let play_badge: Element<'_, Message> = container(
+                                container(render_svg(icons::ICON_PLAY, 20.0, true, false))
+                                    .padding([8, 10])
+                                    .style(|_: &Theme| container::Style {
+                                        background: Some(Background::Color(Color::from_rgba(0.06, 0.06, 0.09, 0.70))),
+                                        border: iced::Border {
+                                            color: Color::from_rgba(1.0, 1.0, 1.0, 0.85),
+                                            width: 1.0,
+                                            radius: theme::RADIUS_FULL,
+                                        },
+                                        ..Default::default()
+                                    }),
                             )
                             .center(Fill)
-                            .into()
+                            .into();
+
+                            // Top-left VIDEO indicator pill
+                            let video_pill: Element<'_, Message> = container(
+                                container(
+                                    row![
+                                        render_svg(icons::ICON_VIDEO, 11.0, true, false),
+                                        text("VIDEO").size(9).color(Color::WHITE),
+                                    ]
+                                    .spacing(4)
+                                    .align_y(Alignment::Center),
+                                )
+                                .padding([2, 6])
+                                .style(|_: &Theme| container::Style {
+                                    background: Some(Background::Color(Color::from_rgba(0.06, 0.06, 0.09, 0.85))),
+                                    border: iced::Border {
+                                        color: Color::from_rgba(1.0, 1.0, 1.0, 0.35),
+                                        width: 1.0,
+                                        radius: theme::RADIUS_SM,
+                                    },
+                                    ..Default::default()
+                                }),
+                            )
+                            .padding([5, 6])
+                            .into();
+
+                            stack![video_thumb, play_badge, video_pill]
+                                .width(Fill)
+                                .height(Fill)
+                                .into()
                         }
                     };
 
@@ -2209,11 +2299,42 @@ impl AutoCamApp {
 
                     // Context Menu Overlay when 3-dots is clicked
                     if is_menu_open {
+                        let primary_menu_btn: Element<'_, Message> = match item.kind {
+                            MediaKind::Video => button(
+                                row![
+                                    render_svg(icons::ICON_PLAY, 12.0, true, false),
+                                    text("เล่นวิดีโอ").size(11).color(Color::WHITE),
+                                ]
+                                .spacing(6)
+                                .align_y(Alignment::Center),
+                            )
+                            .on_press(Message::PlayVideo(item.path.clone()))
+                            .style(theme::media_menu_btn_style(false))
+                            .padding([4, 8])
+                            .width(Fill)
+                            .into(),
+
+                            MediaKind::Photo => button(
+                                row![
+                                    render_svg(icons::ICON_CAMERA, 12.0, true, false),
+                                    text("ดูรูปภาพ").size(11).color(Color::WHITE),
+                                ]
+                                .spacing(6)
+                                .align_y(Alignment::Center),
+                            )
+                            .on_press(Message::OpenViewerWindow(item.path.clone()))
+                            .style(theme::media_menu_btn_style(false))
+                            .padding([4, 8])
+                            .width(Fill)
+                            .into(),
+                        };
+
                         let menu_overlay: Element<'_, Message> = container(
                             column![
+                                primary_menu_btn,
                                 button(
                                     row![
-                                        render_svg(icons::ICON_FOLDER, 13.0, true, false),
+                                        render_svg(icons::ICON_FOLDER, 12.0, true, false),
                                         text("เปิดใน explorer").size(11).color(Color::WHITE),
                                     ]
                                     .spacing(6)
@@ -2221,12 +2342,12 @@ impl AutoCamApp {
                                 )
                                 .on_press(Message::OpenInExplorer(item.path.clone()))
                                 .style(theme::media_menu_btn_style(false))
-                                .padding([5, 8])
+                                .padding([4, 8])
                                 .width(Fill),
 
                                 button(
                                     row![
-                                        render_svg(icons::ICON_COPY, 13.0, true, false),
+                                        render_svg(icons::ICON_COPY, 12.0, true, false),
                                         text("copy").size(11).color(Color::WHITE),
                                     ]
                                     .spacing(6)
@@ -2234,12 +2355,12 @@ impl AutoCamApp {
                                 )
                                 .on_press(Message::CopyMedia(item.path.clone()))
                                 .style(theme::media_menu_btn_style(false))
-                                .padding([5, 8])
+                                .padding([4, 8])
                                 .width(Fill),
 
                                 button(
                                     row![
-                                        render_svg(icons::ICON_COPY, 13.0, true, false),
+                                        render_svg(icons::ICON_COPY, 12.0, true, false),
                                         text("copy path").size(11).color(Color::WHITE),
                                     ]
                                     .spacing(6)
@@ -2247,12 +2368,12 @@ impl AutoCamApp {
                                 )
                                 .on_press(Message::CopyMediaPath(item.path.clone()))
                                 .style(theme::media_menu_btn_style(false))
-                                .padding([5, 8])
+                                .padding([4, 8])
                                 .width(Fill),
 
                                 button(
                                     row![
-                                        render_svg(icons::ICON_TRASH, 13.0, true, true),
+                                        render_svg(icons::ICON_TRASH, 12.0, true, true),
                                         text("delete").size(11).color(Color::WHITE),
                                     ]
                                     .spacing(6)
@@ -2260,11 +2381,11 @@ impl AutoCamApp {
                                 )
                                 .on_press(Message::DeleteMedia(item.path.clone()))
                                 .style(theme::media_menu_btn_style(true))
-                                .padding([5, 8])
+                                .padding([4, 8])
                                 .width(Fill),
                             ]
-                            .spacing(3)
-                            .padding([5, 5]),
+                            .spacing(2)
+                            .padding([4, 4]),
                         )
                         .style(theme::media_menu_style)
                         .width(Length::Fixed(150.0))
@@ -2272,7 +2393,7 @@ impl AutoCamApp {
 
                         tile_stack = tile_stack.push(
                             column![
-                                Space::new().height(Length::Fixed(28.0)),
+                                Space::new().height(Length::Fixed(26.0)),
                                 row![Space::new().width(Fill), menu_overlay].width(Fill),
                             ]
                             .width(Fill)
@@ -2280,17 +2401,22 @@ impl AutoCamApp {
                         );
                     }
 
-                    // Click image to open in Photo Viewer Window
+                    // Click image or video to open or play
                     let click_target_path = item.path.clone();
+                    let on_press_msg = match item.kind {
+                        MediaKind::Photo => Message::OpenViewerWindow(click_target_path),
+                        MediaKind::Video => Message::PlayVideo(click_target_path),
+                    };
+
                     let tile_box = mouse_area(
                         container(tile_stack)
                             .style(theme::media_tile_style)
                             .width(Fill)
-                            .height(Length::Fixed(150.0)),
+                            .height(Length::Fixed(165.0)),
                     )
                     .on_enter(Message::MediaHovered(Some(idx)))
                     .on_exit(Message::MediaHovered(None))
-                    .on_press(Message::OpenViewerWindow(click_target_path));
+                    .on_press(on_press_msg);
 
                     row_tiles = row_tiles.push(container(tile_box).width(Length::FillPortion(1)));
                 }
@@ -2299,7 +2425,7 @@ impl AutoCamApp {
                 let mut cell_count = chunk.len();
                 while cell_count < items_per_row {
                     row_tiles = row_tiles.push(
-                        container(Space::new().width(Fill).height(Length::Fixed(150.0)))
+                        container(Space::new().width(Fill).height(Length::Fixed(165.0)))
                             .style(theme::media_tile_style)
                             .width(Length::FillPortion(1)),
                     );
@@ -2995,6 +3121,18 @@ fn render_icon_btn<'a>(
         position,
     )
     .into()
+}
+
+/// Helper function to create a sleek vertical divider '|'
+fn toolbar_divider<'a>() -> Element<'a, Message> {
+    container(Space::new().width(Length::Fixed(1.0)).height(Length::Fixed(14.0)))
+        .style(|_: &Theme| container::Style {
+            background: Some(Background::Color(Color::from_rgba(1.0, 1.0, 1.0, 0.25))),
+            ..Default::default()
+        })
+        .padding([0, 2])
+        .align_y(Alignment::Center)
+        .into()
 }
 
 /// Borderless Window Responsive Resize Handles for multi-window

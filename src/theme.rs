@@ -25,6 +25,13 @@ pub const RADIUS_SM: Radius = Radius {
     bottom_left: 4.0,
 };
 
+pub const RADIUS_FULL: Radius = Radius {
+    top_left: 999.0,
+    top_right: 999.0,
+    bottom_right: 999.0,
+    bottom_left: 999.0,
+};
+
 // Root Window Style - Zero white border, 100% flush rectangular dark frame
 pub fn root_window_style(_theme: &Theme) -> container::Style {
     container::Style {
@@ -318,18 +325,18 @@ pub fn media_tile_style(_theme: &Theme) -> container::Style {
 
 pub fn media_menu_style(_theme: &Theme) -> container::Style {
     container::Style {
-        background: Some(Background::Color(Color::from_rgba(0.09, 0.09, 0.11, 0.98))),
+        background: Some(Background::Color(Color::from_rgb(0.15, 0.15, 0.18))),
         border: Border {
-            color: COLOR_BORDER_ACTIVE,
+            color: Color::from_rgb(0.50, 0.50, 0.58),
             width: 1.0,
             radius: RADIUS_SM,
         },
         shadow: Shadow {
-            color: Color::from_rgba(0.0, 0.0, 0.0, 0.6),
-            offset: iced::Vector::new(0.0, 4.0),
-            blur_radius: 12.0,
+            color: Color::from_rgba(0.0, 0.0, 0.0, 0.90),
+            offset: iced::Vector::new(0.0, 6.0),
+            blur_radius: 16.0,
         },
-        text_color: Some(COLOR_TEXT),
+        text_color: Some(Color::WHITE),
         ..Default::default()
     }
 }
@@ -337,9 +344,9 @@ pub fn media_menu_style(_theme: &Theme) -> container::Style {
 pub fn dots_button_style(_theme: &Theme, status: button::Status) -> button::Style {
     let bg = match status {
         button::Status::Hovered | button::Status::Pressed => {
-            Color::from_rgba(0.25, 0.25, 0.28, 0.95)
+            Color::from_rgba(0.32, 0.32, 0.40, 0.95)
         }
-        _ => Color::from_rgba(0.08, 0.08, 0.10, 0.85),
+        _ => Color::from_rgba(0.10, 0.10, 0.14, 0.90),
     };
 
     button::Style {
@@ -360,27 +367,27 @@ pub fn media_menu_btn_style(is_danger: bool) -> impl Fn(&Theme, button::Status) 
         let (bg, text_color, border_color) = if is_danger {
             match status {
                 button::Status::Hovered | button::Status::Pressed => (
-                    Color::from_rgb(0.95, 0.22, 0.22),
+                    Color::from_rgb(0.92, 0.22, 0.22),
                     Color::WHITE,
                     Color::WHITE,
                 ),
                 _ => (
-                    Color::from_rgb(0.85, 0.20, 0.20),
+                    Color::from_rgb(0.70, 0.16, 0.16),
                     Color::WHITE,
-                    Color::TRANSPARENT,
+                    Color::from_rgb(0.85, 0.25, 0.25),
                 ),
             }
         } else {
             match status {
                 button::Status::Hovered | button::Status::Pressed => (
-                    Color::from_rgb(0.24, 0.24, 0.28),
+                    Color::from_rgb(0.35, 0.35, 0.44),
                     Color::WHITE,
-                    Color::from_rgb(0.6, 0.6, 0.65),
+                    Color::WHITE,
                 ),
                 _ => (
-                    Color::from_rgb(0.12, 0.12, 0.15),
+                    Color::from_rgb(0.22, 0.22, 0.27),
                     Color::WHITE,
-                    Color::TRANSPARENT,
+                    Color::from_rgb(0.35, 0.35, 0.42),
                 ),
             }
         };

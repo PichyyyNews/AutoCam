@@ -58,6 +58,44 @@ impl VideoRecorder {
     }
 }
 
+/// Extract the first JPEG frame from an AVI (MJPEG) file for thumbnail preview
+pub fn extract_first_frame_jpeg<P: AsRef<Path>>(path: P) -> Option<Vec<u8>> {
+    use std::io::Read;
+    let mut file = File::open(path).ok()?;
+    file.seek(SeekFrom::Start(220)).ok()?;
+    let mut header = [0u8; 12];
+    file.read_exact(&mut header).ok()?;
+
+    if &header[0..4] == b"movi" && &header[4..8] == b"00dc" {
+        let len = u32::from_le_bytes([header[8], header[9], header[10], header[11]]) as usize;
+        if len > 0 && len < 10 * 1024 * 1024 {
+            let mut jpeg = vec![0u8; len];
+            file.read_exact(&mut jpeg).ok()?;
+            if jpeg.len() >= 2 && jpeg[0] == 0xFF && jpeg[1] == 0xD8 {
+                return Some(jpeg);
+            }
+        }
+    }
+
+    // Fallback: search for "00dc" in the first 16 KB
+    file.seek(SeekFrom::Start(0)).ok()?;
+    let mut buf = vec![0u8; 16384];
+    let n = file.read(&mut buf).ok()?;
+    let pos = buf[..n].windows(4).position(|w| w == b"00dc")?;
+    file.seek(SeekFrom::Start((pos + 4) as u64)).ok()?;
+    let mut len_bytes = [0u8; 4];
+    file.read_exact(&mut len_bytes).ok()?;
+    let len = u32::from_le_bytes(len_bytes) as usize;
+    if len > 0 && len < 10 * 1024 * 1024 {
+        let mut jpeg = vec![0u8; len];
+        file.read_exact(&mut jpeg).ok()?;
+        if jpeg.len() >= 2 && jpeg[0] == 0xFF && jpeg[1] == 0xD8 {
+            return Some(jpeg);
+        }
+    }
+    None
+}
+
 struct IndexEntry {
     offset: u32,
     length: u32,
@@ -311,6 +349,12 @@ mod tests {
         assert_eq!(&bytes[8..12], b"AVI ");
         assert_eq!(&bytes[12..16], b"LIST");
         assert_eq!(&bytes[20..24], b"hdrl");
+
+        // Test thumbnail extraction
+        let thumb_jpeg = extract_first_frame_jpeg(&path);
+        assert!(thumb_jpeg.is_some());
+        let jpeg_data = thumb_jpeg.unwrap();
+        assert_eq!(&jpeg_data[0..2], &[0xFF, 0xD8]);
 
         let _ = std::fs::remove_file(&path);
     }
