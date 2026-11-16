@@ -13,6 +13,7 @@ pub const COLOR_BORDER: Color = Color::from_rgb(0.180, 0.180, 0.200);     // #2e
 pub const COLOR_BORDER_ACTIVE: Color = Color::from_rgb(0.380, 0.380, 0.410); // #616169 (Bright border)
 pub const COLOR_TEXT: Color = Color::from_rgb(0.960, 0.960, 0.970);       // #f5f5f7 (Crisp white)
 pub const COLOR_TEXT_MUTED: Color = Color::from_rgb(0.620, 0.620, 0.660); // #9e9ea8 (Subtle zinc text)
+pub const COLOR_DISABLED: Color = Color::from_rgba(0.55, 0.55, 0.60, 0.35); // #8c8c99 dimmed
 pub const COLOR_DANGER: Color = Color::from_rgb(0.937, 0.267, 0.267);     // #ef4444 (Close hover only)
 
 // Radius Tokens
@@ -160,6 +161,20 @@ pub fn pick_list_style(_theme: &Theme, status: pick_list::Status) -> pick_list::
     }
 }
 
+pub fn disabled_button_style(_theme: &Theme, _status: button::Status) -> button::Style {
+    button::Style {
+        background: Some(Background::Color(Color::TRANSPARENT)),
+        text_color: COLOR_DISABLED,
+        border: Border {
+            color: Color::TRANSPARENT,
+            width: 0.0,
+            radius: RADIUS_SM,
+        },
+        shadow: Shadow::default(),
+        ..Default::default()
+    }
+}
+
 pub fn clean_button_style(
     is_active: bool,
     is_danger: bool,
@@ -167,18 +182,18 @@ pub fn clean_button_style(
     move |_theme, status| {
         let (bg, text_color) = if is_danger {
             match status {
-                button::Status::Hovered => (
+                button::Status::Hovered | button::Status::Pressed => (
                     COLOR_DANGER,
-                    COLOR_TEXT,
+                    Color::WHITE,
                 ),
                 _ => (
                     Color::TRANSPARENT,
-                    COLOR_TEXT_MUTED,
+                    COLOR_DANGER,
                 ),
             }
         } else if is_active {
             match status {
-                button::Status::Hovered => (
+                button::Status::Hovered | button::Status::Pressed => (
                     COLOR_ACTIVE_BG,
                     COLOR_TEXT,
                 ),
@@ -189,7 +204,7 @@ pub fn clean_button_style(
             }
         } else {
             match status {
-                button::Status::Hovered => (
+                button::Status::Hovered | button::Status::Pressed => (
                     COLOR_SURFACE_MUTED,
                     COLOR_TEXT,
                 ),

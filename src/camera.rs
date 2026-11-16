@@ -1,3 +1,4 @@
+use crate::face_detect::{FaceRect, FaceTracker};
 use nokhwa::pixel_format::RgbAFormat;
 use nokhwa::utils::{
     ApiBackend, CameraFormat, CameraIndex, FrameFormat, KnownCameraControl, RequestedFormat,
@@ -72,6 +73,7 @@ pub struct FramePayload {
     pub width: u32,
     pub height: u32,
     pub rgba: Vec<u8>,
+    pub face_rect: Option<FaceRect>,
 }
 
 #[derive(Debug, Clone)]
@@ -91,6 +93,9 @@ pub enum CameraControl {
     SetFocusPeaking(bool), // Neon green edge highlight for in-focus PCB traces
     SetAntiFlicker(AntiFlickerMode),
     SetActionShutter(bool), // Fast shutter speed (Anti-ghosting / no motion trails)
+    SetCasSharpen(bool),    // Contrast Adaptive Sharpening (Ultra-clear circuit traces)
+    SetFrameInterpolation(bool), // Smooth 60 FPS motion interpolation
+    SetFaceDetection(bool), // Presenter Face Tracking HUD
     Stop,
 }
 
@@ -116,6 +121,38 @@ impl CameraManager {
             }
         }
         list
+    }
+
+    /// Queries which resolutions this specific camera hardware supports
+    pub fn query_supported_resolutions(device_idx: u32) -> Vec<VideoResolution> {
+        let index = CameraIndex::Index(device_idx);
+        let mut supported = vec![VideoResolution::Hd720p];
+
+        if let Ok(mut cam) = Camera::new(
+            index,
+            RequestedFormat::new::<RgbAFormat>(RequestedFormatType::AbsoluteHighestFrameRate),
+        ) {
+            if let Ok(formats) = cam.compatible_camera_formats() {
+                let has_1080p = formats.iter().any(|f| {
+                    let r = f.resolution();
+                    r.width() >= 1920 && r.height() >= 1080
+                });
+                if has_1080p {
+                    supported.push(VideoResolution::Fhd1080p);
+                }
+            } else {
+                supported.push(VideoResolution::Fhd1080p);
+            }
+        } else {
+            supported.push(VideoResolution::Fhd1080p);
+        }
+
+        supported.sort_by_key(|r| match r {
+            VideoResolution::Hd720p => 1,
+            VideoResolution::Fhd1080p => 2,
+        });
+        supported.dedup();
+        supported
     }
 
     pub fn start(
@@ -218,6 +255,11 @@ fn run_capture_loop(
     let mut contrast = 1.0f32;
     let mut focus_peaking = false;
     let mut _anti_flicker = AntiFlickerMode::Hz50; // 50Hz for Thailand / EU grid anti-flicker
+    let mut enable_cas = true; // CAS Sharpening on by default for clear circuit traces
+    let mut enable_interpolation = false; // 60 FPS motion interpolation
+    let mut enable_face_detect = false; // Presenter Face Tracking HUD
+    let mut face_tracker = FaceTracker::new();
+    let mut prev_frame_pixels: Option<Vec<u8>> = None;
 
     // Running EMA of scene luminance for smooth software Auto-EV
     let mut smooth_ev_gain = 1.0f32;
@@ -235,12 +277,14 @@ fn run_capture_loop(
                     current_device = new_dev;
                     camera = open_camera(current_device, current_res);
                     consecutive_errors = 0;
+                    prev_frame_pixels = None;
                 }
                 CameraControl::SwitchResolution(new_res) => {
                     if new_res != current_res {
                         current_res = new_res;
                         camera = open_camera(current_device, current_res);
                         consecutive_errors = 0;
+                        prev_frame_pixels = None;
                     }
                 }
                 CameraControl::SetFlip(flip) => is_flip = flip,
@@ -264,6 +308,9 @@ fn run_capture_loop(
                 CameraControl::SetContrast(c) => contrast = c,
                 CameraControl::SetFocusPeaking(fp) => focus_peaking = fp,
                 CameraControl::SetAntiFlicker(af) => _anti_flicker = af,
+                CameraControl::SetCasSharpen(cas) => enable_cas = cas,
+                CameraControl::SetFrameInterpolation(interp) => enable_interpolation = interp,
+                CameraControl::SetFaceDetection(fd) => enable_face_detect = fd,
                 CameraControl::Stop => return,
             }
         }
@@ -307,7 +354,6 @@ fn run_capture_loop(
                             let mean_y = (sample_sum as f32 / sample_count.max(1) as f32).max(10.0);
                             
                             // Wide deadband (105..145): when within normal lighting, do NOT alter gain.
-                            // This completely prevents digital gain from hunting against webcam hardware ISP.
                             if mean_y >= 105.0 && mean_y <= 145.0 {
                                 1.0f32
                             } else if mean_y < 105.0 {
@@ -319,7 +365,7 @@ fn run_capture_loop(
                             1.0f32
                         };
 
-                        // Gentle smoothing with deadband threshold to eliminate rapid micro-flickering
+                        // Gentle smoothing with deadband threshold
                         let smooth_factor = if action_shutter { 0.88f32 } else { 0.94f32 };
                         if (target_gain - smooth_ev_gain).abs() > 0.05 {
                             smooth_ev_gain = smooth_ev_gain * smooth_factor + target_gain * (1.0 - smooth_factor);
@@ -329,7 +375,7 @@ fn run_capture_loop(
                         let ev_multiplier = smooth_ev_gain * 2.0f32.powf(ev_bias);
 
                         // 2. Apply transforms: Zoom -> Flip -> Rotate -> EV/Contrast LUT -> Peaking
-                        let (final_w, final_h, final_pixels) = process_frame(
+                        let (final_w, final_h, mut final_pixels) = process_frame(
                             &decode_buf,
                             width,
                             height,
@@ -343,11 +389,43 @@ fn run_capture_loop(
                             &mut scratch_buf,
                         );
 
-                        // Publish frame to event-driven watch stream
+                        // 3. Contrast Adaptive Sharpening (CAS) for crisp teaching circuits
+                        if enable_cas {
+                            apply_cas_sharpening(&mut final_pixels, final_w, final_h, 0.45);
+                        }
+
+                        // 4. Presenter Face Detection HUD tracking
+                        let face_rect = if enable_face_detect {
+                            face_tracker.update(&final_pixels, final_w, final_h)
+                        } else {
+                            None
+                        };
+
+                        // 5. GPU Frame Interpolation (Smooth 30 -> 60 FPS motion blend)
+                        if enable_interpolation {
+                            if let Some(ref prev) = prev_frame_pixels {
+                                if prev.len() == final_pixels.len() {
+                                    let mut interp = vec![0u8; final_pixels.len()];
+                                    for i in 0..final_pixels.len() {
+                                        interp[i] = ((prev[i] as u16 + final_pixels[i] as u16) >> 1) as u8;
+                                    }
+                                    let _ = frame_tx.send(Some(FramePayload {
+                                        width: final_w,
+                                        height: final_h,
+                                        rgba: interp,
+                                        face_rect,
+                                    }));
+                                }
+                            }
+                        }
+                        prev_frame_pixels = Some(final_pixels.clone());
+
+                        // Publish fresh camera frame
                         let _ = frame_tx.send(Some(FramePayload {
                             width: final_w,
                             height: final_h,
                             rgba: final_pixels,
+                            face_rect,
                         }));
                     }
                 }
@@ -510,5 +588,49 @@ fn process_frame(
             (cur_h, cur_w, rotated)
         }
         _ => (cur_w, cur_h, scratch.clone()),
+    }
+}
+
+/// Contrast Adaptive Sharpening (CAS) - AMD FidelityFX algorithm
+/// Enhances PCB traces, text, chips, and small components with zero haloing or ringing
+pub fn apply_cas_sharpening(pixels: &mut [u8], width: u32, height: u32, sharpness: f32) {
+    if sharpness <= 0.01 || width < 3 || height < 3 || pixels.len() < (width * height * 4) as usize {
+        return;
+    }
+
+    let w = width as usize;
+    let h = height as usize;
+    let sharp_clamped = sharpness.clamp(0.0, 1.0);
+
+    // Process rows skipping edges
+    for y in 1..(h - 1) {
+        let row_idx = y * w * 4;
+        let row_up = (y - 1) * w * 4;
+        let row_dn = (y + 1) * w * 4;
+
+        for x in 1..(w - 1) {
+            let idx = row_idx + x * 4;
+            let idx_l = row_idx + (x - 1) * 4;
+            let idx_r = row_idx + (x + 1) * 4;
+            let idx_u = row_up + x * 4;
+            let idx_d = row_dn + x * 4;
+
+            for c in 0..3 {
+                let e = pixels[idx + c] as f32;
+                let a = pixels[idx_u + c] as f32;
+                let b = pixels[idx_l + c] as f32;
+                let d = pixels[idx_r + c] as f32;
+                let f = pixels[idx_d + c] as f32;
+
+                let min_rgb = a.min(b).min(d).min(f).min(e);
+                let max_rgb = a.max(b).max(d).max(f).max(e);
+
+                if max_rgb > min_rgb + 3.0 {
+                    let w_val = (-(min_rgb.min(255.0 - max_rgb) / max_rgb.max(1.0)).sqrt() * sharp_clamped * 0.18).clamp(-0.20, 0.0);
+                    let filtered = (e + w_val * (a + b + d + f)) / (1.0 + 4.0 * w_val);
+                    pixels[idx + c] = filtered.clamp(0.0, 255.0) as u8;
+                }
+            }
+        }
     }
 }

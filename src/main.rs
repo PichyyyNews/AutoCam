@@ -1,6 +1,7 @@
 #![windows_subsystem = "windows"]
 
 mod camera;
+mod face_detect;
 mod icons;
 mod theme;
 
@@ -16,7 +17,9 @@ use iced::widget::{
     Space,
 };
 use iced::window;
-use iced::{Alignment, Background, Color, ContentFit, Element, Fill, Length, Subscription, Task};
+use iced::{
+    Alignment, Background, Border, Color, ContentFit, Element, Fill, Length, Subscription, Task,
+};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const APP_ICON_BYTES: &[u8] = include_bytes!("../public/icon.png");
@@ -50,6 +53,7 @@ pub struct AutoCamApp {
     camera_manager: Option<CameraManager>,
     available_devices: Vec<CameraDeviceInfo>,
     selected_device: Option<CameraDeviceInfo>,
+    supported_resolutions: Vec<VideoResolution>,
     resolution: VideoResolution,
     is_pip: bool,
     pip_hovered: bool,
@@ -75,6 +79,9 @@ pub struct AutoCamApp {
     brightness: i32,
     contrast: f32,
     focus_peaking: bool,
+    cas_sharpen: bool,
+    frame_interpolation: bool,
+    face_detection: bool,
     anti_flicker: AntiFlickerMode,
     latest_frame: Option<FramePayload>,
     snapshot_toast: Option<(String, Instant)>,
@@ -116,6 +123,9 @@ pub enum Message {
     SetBrightness(i32),
     SetContrast(f32),
     ToggleFocusPeaking,
+    ToggleCasSharpen,
+    ToggleFrameInterpolation,
+    ToggleFaceDetection,
     SetAntiFlicker(AntiFlickerMode),
     CaptureSnapshot,
 }
@@ -142,6 +152,11 @@ impl AutoCamApp {
     pub fn new() -> (Self, Task<Message>) {
         let devices = CameraManager::query_available_devices();
         let selected_device = devices.first().cloned();
+        let supported_resolutions = if let Some(ref dev) = selected_device {
+            CameraManager::query_supported_resolutions(dev.index)
+        } else {
+            vec![VideoResolution::Hd720p, VideoResolution::Fhd1080p]
+        };
         let resolution = VideoResolution::Hd720p;
 
         let camera_manager = if let Some(ref dev) = selected_device {
@@ -163,6 +178,7 @@ impl AutoCamApp {
                 camera_manager,
                 available_devices: devices,
                 selected_device,
+                supported_resolutions,
                 resolution,
                 is_pip: false,
                 pip_hovered: false,
@@ -187,6 +203,9 @@ impl AutoCamApp {
                 brightness: 0,
                 contrast: 1.0,
                 focus_peaking: false,
+                cas_sharpen: true,
+                frame_interpolation: false,
+                face_detection: false,
                 anti_flicker: AntiFlickerMode::Hz50,
                 latest_frame: None,
                 snapshot_toast: None,
@@ -293,6 +312,12 @@ impl AutoCamApp {
                         Key::Character(c) if c.eq_ignore_ascii_case("e") => {
                             return self.update(Message::ToggleAutoEv)
                         }
+                        Key::Character(c) if c.eq_ignore_ascii_case("d") => {
+                            return self.update(Message::ToggleFaceDetection)
+                        }
+                        Key::Character(c) if c.eq_ignore_ascii_case("i") => {
+                            return self.update(Message::ToggleFrameInterpolation)
+                        }
                         Key::Character(c) if c.eq_ignore_ascii_case("c") => {
                             return self.update(Message::CaptureSnapshot)
                         }
@@ -321,8 +346,15 @@ impl AutoCamApp {
                 self.status_text = format!("Connected: {}", dev.name);
                 self.is_loading_camera = true; // Show smooth freeze-to-live spinner
 
+                // Query hardware capabilities of selected camera
+                self.supported_resolutions = CameraManager::query_supported_resolutions(dev.index);
+                if !self.supported_resolutions.contains(&self.resolution) {
+                    self.resolution = VideoResolution::Hd720p;
+                }
+
                 if let Some(ref mgr) = self.camera_manager {
                     mgr.send(CameraControl::SwitchDevice(dev.index));
+                    mgr.send(CameraControl::SwitchResolution(self.resolution));
                 } else {
                     let mgr = CameraManager::start(dev.index, self.resolution);
                     mgr.send(CameraControl::SetFlip(self.is_flip));
@@ -333,6 +365,9 @@ impl AutoCamApp {
                     mgr.send(CameraControl::SetBrightness(self.brightness));
                     mgr.send(CameraControl::SetContrast(self.contrast));
                     mgr.send(CameraControl::SetFocusPeaking(self.focus_peaking));
+                    mgr.send(CameraControl::SetCasSharpen(self.cas_sharpen));
+                    mgr.send(CameraControl::SetFrameInterpolation(self.frame_interpolation));
+                    mgr.send(CameraControl::SetFaceDetection(self.face_detection));
                     self.camera_manager = Some(mgr);
                 }
                 Task::none()
@@ -343,14 +378,44 @@ impl AutoCamApp {
                     VideoResolution::Hd720p => VideoResolution::Fhd1080p,
                     VideoResolution::Fhd1080p => VideoResolution::Hd720p,
                 };
-                self.update(Message::SetResolution(next_res))
+                if self.supported_resolutions.contains(&next_res) {
+                    self.update(Message::SetResolution(next_res))
+                } else {
+                    Task::none()
+                }
             }
 
             Message::SetResolution(res) => {
-                self.resolution = res;
-                self.is_loading_camera = true;
+                if self.supported_resolutions.contains(&res) && res != self.resolution {
+                    self.resolution = res;
+                    self.is_loading_camera = true;
+                    if let Some(ref mgr) = self.camera_manager {
+                        mgr.send(CameraControl::SwitchResolution(res));
+                    }
+                }
+                Task::none()
+            }
+
+            Message::ToggleCasSharpen => {
+                self.cas_sharpen = !self.cas_sharpen;
                 if let Some(ref mgr) = self.camera_manager {
-                    mgr.send(CameraControl::SwitchResolution(res));
+                    mgr.send(CameraControl::SetCasSharpen(self.cas_sharpen));
+                }
+                Task::none()
+            }
+
+            Message::ToggleFrameInterpolation => {
+                self.frame_interpolation = !self.frame_interpolation;
+                if let Some(ref mgr) = self.camera_manager {
+                    mgr.send(CameraControl::SetFrameInterpolation(self.frame_interpolation));
+                }
+                Task::none()
+            }
+
+            Message::ToggleFaceDetection => {
+                self.face_detection = !self.face_detection;
+                if let Some(ref mgr) = self.camera_manager {
+                    mgr.send(CameraControl::SetFaceDetection(self.face_detection));
                 }
                 Task::none()
             }
@@ -608,17 +673,29 @@ impl AutoCamApp {
                     .style(theme::pick_list_style)
                     .text_size(12)
                     .padding([3, 8]),
-                    // Resolution Toggle Button
-                    tooltip(
-                        button(text(self.resolution.label()).size(11))
-                            .on_press(Message::ToggleResolution)
-                            .style(theme::clean_button_style(false, false))
-                            .padding([4, 8]),
-                        container(text("Toggle 720p / 1080p").size(11))
-                            .padding([3, 7])
-                            .style(theme::tooltip_style),
-                        tooltip::Position::Bottom,
-                    ),
+                    // Resolution Toggle Button (Probed capability with grayed-out fallback)
+                    if self.supported_resolutions.contains(&VideoResolution::Fhd1080p) {
+                        tooltip(
+                            button(text(self.resolution.label()).size(11))
+                                .on_press(Message::ToggleResolution)
+                                .style(theme::clean_button_style(false, false))
+                                .padding([4, 8]),
+                            container(text("Toggle 720p / 1080p").size(11))
+                                .padding([3, 7])
+                                .style(theme::tooltip_style),
+                            tooltip::Position::Bottom,
+                        )
+                    } else {
+                        tooltip(
+                            button(text("720p (Max)").size(11))
+                                .style(theme::disabled_button_style)
+                                .padding([4, 8]),
+                            container(text("1080p unsupported by current camera").size(11))
+                                .padding([3, 7])
+                                .style(theme::tooltip_style),
+                            tooltip::Position::Bottom,
+                        )
+                    },
                     // Refresh Device Button
                     render_icon_btn(
                         icons::ICON_REFRESH,
@@ -797,7 +874,46 @@ impl AutoCamApp {
             }
         }
 
-        // 2b. Freeze-to-Live Micro Loading Overlay
+        // 2b. Presenter Face Detection HUD Overlay (Thin 1px crisp bounding box)
+        if self.face_detection {
+            if let Some(ref frame) = self.latest_frame {
+                if let Some(rect) = frame.face_rect {
+                    let top_ratio = (rect.y * 1000.0) as u16;
+                    let bottom_ratio = ((1.0 - rect.y - rect.height).max(0.0) * 1000.0) as u16;
+                    let left_ratio = (rect.x * 1000.0) as u16;
+                    let right_ratio = ((1.0 - rect.x - rect.width).max(0.0) * 1000.0) as u16;
+                    let width_ratio = (rect.width * 1000.0).max(10.0) as u16;
+                    let height_ratio = (rect.height * 1000.0).max(10.0) as u16;
+
+                    let face_hud = column![
+                        Space::new().height(Length::FillPortion(top_ratio)),
+                        row![
+                            Space::new().width(Length::FillPortion(left_ratio)),
+                            container(Space::new().width(Fill).height(Fill))
+                                .width(Length::FillPortion(width_ratio))
+                                .height(Fill)
+                                .style(|_| container::Style {
+                                    border: Border {
+                                        color: Color::from_rgba(0.9, 0.95, 1.0, 0.55),
+                                        width: 1.0,
+                                        radius: theme::RADIUS_SM,
+                                    },
+                                    ..Default::default()
+                                }),
+                            Space::new().width(Length::FillPortion(right_ratio)),
+                        ]
+                        .height(Length::FillPortion(height_ratio)),
+                        Space::new().height(Length::FillPortion(bottom_ratio)),
+                    ]
+                    .width(Fill)
+                    .height(Fill);
+
+                    viewport_stack.push(face_hud.into());
+                }
+            }
+        }
+
+        // 2c. Freeze-to-Live Micro Loading Overlay
         if self.is_loading_camera {
             let loader = container(
                 container(
@@ -973,6 +1089,19 @@ impl AutoCamApp {
                     false,
                     tooltip::Position::Top,
                 ),
+                // Presenter Face Tracking HUD
+                render_icon_btn(
+                    icons::ICON_FACE,
+                    if self.face_detection {
+                        "Face HUD: Active [D]"
+                    } else {
+                        "Face HUD: Off [D]"
+                    },
+                    Message::ToggleFaceDetection,
+                    self.face_detection,
+                    false,
+                    tooltip::Position::Top,
+                ),
                 // Fullscreen Icon Button
                 render_icon_btn(
                     if self.is_fullscreen {
@@ -1052,6 +1181,29 @@ impl AutoCamApp {
         ]
         .spacing(4);
 
+        let is_1080p_supported = self.supported_resolutions.contains(&VideoResolution::Fhd1080p);
+        let btn_1080p: Element<'_, Message> = if is_1080p_supported {
+            button(text("1080p FHD").size(11))
+                .on_press(Message::SetResolution(VideoResolution::Fhd1080p))
+                .style(theme::clean_button_style(
+                    self.resolution == VideoResolution::Fhd1080p,
+                    false,
+                ))
+                .padding([4, 12])
+                .into()
+        } else {
+            tooltip(
+                button(text("1080p FHD (N/A)").size(11))
+                    .style(theme::disabled_button_style)
+                    .padding([4, 12]),
+                container(text("Not supported by camera hardware").size(11))
+                    .padding([3, 7])
+                    .style(theme::tooltip_style),
+                tooltip::Position::Top,
+            )
+            .into()
+        };
+
         let res_section = column![
             text("Resolution").size(11).color(theme::COLOR_TEXT_MUTED),
             row![
@@ -1059,16 +1211,10 @@ impl AutoCamApp {
                     .on_press(Message::SetResolution(VideoResolution::Hd720p))
                     .style(theme::clean_button_style(
                         self.resolution == VideoResolution::Hd720p,
-                        false
+                        false,
                     ))
                     .padding([4, 12]),
-                button(text("1080p FHD").size(11))
-                    .on_press(Message::SetResolution(VideoResolution::Fhd1080p))
-                    .style(theme::clean_button_style(
-                        self.resolution == VideoResolution::Fhd1080p,
-                        false
-                    ))
-                    .padding([4, 12]),
+                btn_1080p,
             ]
             .spacing(8),
         ]
@@ -1091,6 +1237,45 @@ impl AutoCamApp {
                         button(text(if self.action_shutter { "Active" } else { "Off" }).size(10))
                             .on_press(Message::ToggleActionShutter)
                             .style(theme::clean_button_style(self.action_shutter, false))
+                            .padding([2, 8]),
+                    ]
+                    .align_y(Alignment::Center),
+                    // CAS Circuit Sharpening (AMD FidelityFX)
+                    row![
+                        render_svg(icons::ICON_WAND, 14.0, self.cas_sharpen, false),
+                        text("CAS Circuit Sharpening (AMD FidelityFX)")
+                            .size(11)
+                            .color(theme::COLOR_TEXT),
+                        Space::new().width(Fill),
+                        button(text(if self.cas_sharpen { "Active" } else { "Off" }).size(10))
+                            .on_press(Message::ToggleCasSharpen)
+                            .style(theme::clean_button_style(self.cas_sharpen, false))
+                            .padding([2, 8]),
+                    ]
+                    .align_y(Alignment::Center),
+                    // Motion Smoothing (60 FPS Frame Interpolation)
+                    row![
+                        render_svg(icons::ICON_MOTION, 14.0, self.frame_interpolation, false),
+                        text("Motion Smoothing (30 -> 60 FPS)")
+                            .size(11)
+                            .color(theme::COLOR_TEXT),
+                        Space::new().width(Fill),
+                        button(text(if self.frame_interpolation { "Active" } else { "Off" }).size(10))
+                            .on_press(Message::ToggleFrameInterpolation)
+                            .style(theme::clean_button_style(self.frame_interpolation, false))
+                            .padding([2, 8]),
+                    ]
+                    .align_y(Alignment::Center),
+                    // Presenter Face Tracking HUD
+                    row![
+                        render_svg(icons::ICON_FACE, 14.0, self.face_detection, false),
+                        text("Presenter Face Tracking HUD [D]")
+                            .size(11)
+                            .color(theme::COLOR_TEXT),
+                        Space::new().width(Fill),
+                        button(text(if self.face_detection { "Active" } else { "Off" }).size(10))
+                            .on_press(Message::ToggleFaceDetection)
+                            .style(theme::clean_button_style(self.face_detection, false))
                             .padding([2, 8]),
                     ]
                     .align_y(Alignment::Center),
@@ -1166,6 +1351,8 @@ impl AutoCamApp {
                     shortcut_row("C", "Capture high-res snapshot to captures/"),
                     shortcut_row("P", "Toggle Picture-in-Picture"),
                     shortcut_row("F11", "Toggle Fullscreen"),
+                    shortcut_row("D", "Toggle Presenter Face Tracking HUD"),
+                    shortcut_row("I", "Toggle 60 FPS Motion Interpolation"),
                     shortcut_row("+ / -", "Zoom in / Zoom out"),
                     shortcut_row("S", "Toggle Settings"),
                 ]
@@ -1217,6 +1404,45 @@ impl AutoCamApp {
             .height(Length::Fixed(14.0));
 
         let mut layers: Vec<Element<'_, Message>> = vec![video_content];
+
+        // Presenter Face Detection HUD in PiP
+        if self.face_detection {
+            if let Some(ref frame) = self.latest_frame {
+                if let Some(rect) = frame.face_rect {
+                    let top_ratio = (rect.y * 1000.0) as u16;
+                    let bottom_ratio = ((1.0 - rect.y - rect.height).max(0.0) * 1000.0) as u16;
+                    let left_ratio = (rect.x * 1000.0) as u16;
+                    let right_ratio = ((1.0 - rect.x - rect.width).max(0.0) * 1000.0) as u16;
+                    let width_ratio = (rect.width * 1000.0).max(10.0) as u16;
+                    let height_ratio = (rect.height * 1000.0).max(10.0) as u16;
+
+                    let face_hud = column![
+                        Space::new().height(Length::FillPortion(top_ratio)),
+                        row![
+                            Space::new().width(Length::FillPortion(left_ratio)),
+                            container(Space::new().width(Fill).height(Fill))
+                                .width(Length::FillPortion(width_ratio))
+                                .height(Fill)
+                                .style(|_| container::Style {
+                                    border: Border {
+                                        color: Color::from_rgba(0.9, 0.95, 1.0, 0.55),
+                                        width: 1.0,
+                                        radius: theme::RADIUS_SM,
+                                    },
+                                    ..Default::default()
+                                }),
+                            Space::new().width(Length::FillPortion(right_ratio)),
+                        ]
+                        .height(Length::FillPortion(height_ratio)),
+                        Space::new().height(Length::FillPortion(bottom_ratio)),
+                    ]
+                    .width(Fill)
+                    .height(Fill);
+
+                    layers.push(face_hud.into());
+                }
+            }
+        }
 
         if self.pip_hovered {
             let overlay_header = mouse_area(
@@ -1310,22 +1536,14 @@ fn shortcut_row<'a>(key_name: &'static str, description: &'static str) -> Elemen
 fn render_svg<'a>(
     svg_str: &'static str,
     size: f32,
-    is_active: bool,
-    is_danger: bool,
+    _is_active: bool,
+    _is_danger: bool,
 ) -> Element<'a, Message> {
-    let icon_color = if is_danger {
-        theme::COLOR_DANGER
-    } else if is_active {
-        theme::COLOR_TEXT
-    } else {
-        theme::COLOR_TEXT_MUTED
-    };
-
     svg(svg::Handle::from_memory(svg_str.as_bytes()))
         .width(Length::Fixed(size))
         .height(Length::Fixed(size))
-        .style(move |_theme, _status| svg::Style {
-            color: Some(icon_color),
+        .style(|_theme, _status| svg::Style {
+            color: None, // Inherits current button text_color dynamically (e.g. white on hover)
         })
         .into()
 }

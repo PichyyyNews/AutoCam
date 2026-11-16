@@ -114,3 +114,26 @@ pub const ICON_SPINNER: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBo
 pub const ICON_PEAKING: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
   <path d="m12 3-1.912 5.813a2 2 0 0 1-1.275 1.275L3 12l5.813 1.912a2 2 0 0 1 1.275 1.275L12 21l1.912-5.813a2 2 0 0 1 1.275-1.275L21 12l-5.813-1.912a2 2 0 0 1-1.275-1.275L12 3Z"/>
 </svg>"#;
+
+pub const ICON_FACE: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+  <circle cx="12" cy="12" r="10"/>
+  <path d="M8 14s1.5 2 4 2 4-2 4-2"/>
+  <line x1="9" x2="9.01" y1="9" y2="9"/>
+  <line x1="15" x2="15.01" y1="9" y2="9"/>
+</svg>"#;
+
+pub const ICON_WAND: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M15 4V2"/>
+  <path d="M15 16v-2"/>
+  <path d="M8 9h2"/>
+  <path d="M20 9h2"/>
+  <path d="M17.8 11.8 19 13"/>
+  <path d="M15 9h0"/>
+  <path d="M17.8 6.2 19 5"/>
+  <path d="m3 21 9-9"/>
+  <path d="M12.2 6.2 11 5"/>
+</svg>"#;
+
+pub const ICON_MOTION: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+  <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>
+</svg>"#;
