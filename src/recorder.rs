@@ -58,6 +58,96 @@ impl VideoRecorder {
     }
 }
 
+/// Parsed AVI video information
+#[derive(Debug, Clone)]
+pub struct AviVideoInfo {
+    pub fps: u32,
+    pub total_frames: usize,
+    pub frame_locations: Vec<(u64, u32)>, // (byte_offset_in_file, byte_len)
+}
+
+/// Parse all frame offsets from an AVI file
+pub fn parse_avi_video<P: AsRef<Path>>(path: P) -> Option<AviVideoInfo> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = File::open(path).ok()?;
+
+    // Read FPS from AVIMAINHEADER (offset 32 holds micro_sec_per_frame: u32)
+    let mut fps = 30;
+    if file.seek(SeekFrom::Start(32)).is_ok() {
+        let mut us_bytes = [0u8; 4];
+        if file.read_exact(&mut us_bytes).is_ok() {
+            let us = u32::from_le_bytes(us_bytes);
+            if us > 0 {
+                fps = (1_000_000 / us).clamp(1, 120);
+            }
+        }
+    }
+
+    // Locate "movi" chunk
+    let mut movi_start: u64 = 220;
+    let mut buf = [0u8; 4];
+    if file.seek(SeekFrom::Start(movi_start)).is_ok()
+        && file.read_exact(&mut buf).is_ok()
+        && &buf == b"movi"
+    {
+        movi_start += 4;
+    } else {
+        file.seek(SeekFrom::Start(0)).ok()?;
+        let mut search_buf = vec![0u8; 16384];
+        let n = file.read(&mut search_buf).ok()?;
+        if let Some(pos) = search_buf[..n].windows(4).position(|w| w == b"movi") {
+            movi_start = (pos + 4) as u64;
+        } else {
+            return None;
+        }
+    }
+
+    let file_len = file.metadata().ok()?.len();
+    file.seek(SeekFrom::Start(movi_start)).ok()?;
+
+    let mut frame_locations = Vec::new();
+    let mut tag_len = [0u8; 8];
+
+    while let Ok(()) = file.read_exact(&mut tag_len) {
+        let tag = &tag_len[0..4];
+        let len = u32::from_le_bytes([tag_len[4], tag_len[5], tag_len[6], tag_len[7]]);
+
+        if tag == b"00dc" {
+            let current_pos = file.stream_position().ok()?;
+            if len > 0 && (current_pos + len as u64) <= file_len {
+                frame_locations.push((current_pos, len));
+                let pad = (len % 2) as i64;
+                file.seek(SeekFrom::Current(len as i64 + pad)).ok()?;
+            } else {
+                break;
+            }
+        } else {
+            break;
+        }
+    }
+
+    if frame_locations.is_empty() {
+        return None;
+    }
+
+    let total = frame_locations.len();
+    Some(AviVideoInfo {
+        fps,
+        total_frames: total,
+        frame_locations,
+    })
+}
+
+/// Read a single frame's JPEG data by offset and length
+pub fn read_frame_jpeg<P: AsRef<Path>>(path: P, offset: u64, len: u32) -> Option<Vec<u8>> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = File::open(path).ok()?;
+    file.seek(SeekFrom::Start(offset)).ok()?;
+    let mut buf = vec![0u8; len as usize];
+    file.read_exact(&mut buf).ok()?;
+    Some(buf)
+}
+
 /// Extract the first JPEG frame from an AVI (MJPEG) file for thumbnail preview
 pub fn extract_first_frame_jpeg<P: AsRef<Path>>(path: P) -> Option<Vec<u8>> {
     use std::io::Read;
@@ -355,6 +445,16 @@ mod tests {
         assert!(thumb_jpeg.is_some());
         let jpeg_data = thumb_jpeg.unwrap();
         assert_eq!(&jpeg_data[0..2], &[0xFF, 0xD8]);
+
+        // Test video parsing
+        let parsed = parse_avi_video(&path);
+        assert!(parsed.is_some());
+        let info = parsed.unwrap();
+        assert!(info.total_frames >= 2);
+        assert_eq!(info.frame_locations.len(), info.total_frames);
+        let f0 = read_frame_jpeg(&path, info.frame_locations[0].0, info.frame_locations[0].1);
+        assert!(f0.is_some());
+        assert_eq!(&f0.unwrap()[0..2], &[0xFF, 0xD8]);
 
         let _ = std::fs::remove_file(&path);
     }

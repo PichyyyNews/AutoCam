@@ -225,6 +225,15 @@ fn scan_captures_folder() -> Vec<MediaItem> {
     items
 }
 
+#[derive(Debug, Clone)]
+pub struct ViewerVideoState {
+    pub path: PathBuf,
+    pub fps: u32,
+    pub frames: Vec<(u64, u32)>,
+    pub current_frame: usize,
+    pub is_playing: bool,
+}
+
 pub struct AutoCamApp {
     main_window_id: Option<window::Id>,
     settings_window_id: Option<window::Id>,
@@ -289,6 +298,7 @@ pub struct AutoCamApp {
     viewer_selected_path: Option<PathBuf>,
     viewer_image_handle: Option<image::Handle>,
     viewer_info_text: String,
+    viewer_video_state: Option<ViewerVideoState>,
 
     // Customizable Shortcuts
     keybindings: KeyBindings,
@@ -328,6 +338,7 @@ pub enum Message {
     DragWindow(window::Id),
     ResizeWindow(window::Id, window::Direction),
     MinimizeWindow(window::Id),
+    ToggleMaximizeWindow(window::Id),
     CloseApp,
     RefreshDevices,
 
@@ -376,10 +387,14 @@ pub enum Message {
     CopyMediaPath(PathBuf),
     DeleteMedia(PathBuf),
 
-    // Photo Viewer Window
+    // Photo & Video Viewer Window
     OpenViewerWindow(PathBuf),
     CloseViewerWindow,
     ViewerWindowOpened(window::Id),
+    VideoViewerTick,
+    ToggleVideoPlayback,
+    SeekVideo(usize),
+    ReplayVideo,
 
     // Shortcut Rebinding
     StartRebinding(ShortcutAction),
@@ -587,10 +602,11 @@ impl AutoCamApp {
             hovered_media_idx: None,
             active_media_menu_idx: None,
 
-            // Photo Viewer
+            // Photo & Video Viewer
             viewer_selected_path: None,
             viewer_image_handle: None,
             viewer_info_text: String::new(),
+            viewer_video_state: None,
 
             keybindings,
             rebinding_action: None,
@@ -608,7 +624,19 @@ impl AutoCamApp {
         let keyboard_sub = keyboard::listen().map(Message::KeyboardEvent);
         let timer_sub = iced::time::every(Duration::from_secs(1)).map(|_| Message::RecordingTick);
 
-        Subscription::batch(vec![hotplug_sub, frame_sub, keyboard_sub, timer_sub])
+        let mut subs = vec![hotplug_sub, frame_sub, keyboard_sub, timer_sub];
+
+        if self.viewer_window_id.is_some() {
+            if let Some(ref v) = self.viewer_video_state {
+                if v.is_playing {
+                    let fps = v.fps.clamp(1, 60);
+                    let interval_ms = (1000 / fps as u64).max(16);
+                    subs.push(iced::time::every(Duration::from_millis(interval_ms)).map(|_| Message::VideoViewerTick));
+                }
+            }
+        }
+
+        Subscription::batch(subs)
     }
 
     pub fn theme(&self, _window_id: window::Id) -> iced::Theme {
@@ -715,18 +743,92 @@ impl AutoCamApp {
             }
 
             Message::PlayVideo(path) => {
-                let path_str = path.to_string_lossy().to_string();
-                let _ = std::process::Command::new("cmd")
-                    .args(["/C", "start", "", &path_str])
-                    .spawn();
-                self.snapshot_toast = Some((
-                    format!("Playing: {}", path.file_name().unwrap_or_default().to_string_lossy()),
-                    Instant::now(),
-                ));
-                Task::perform(
-                    tokio::time::sleep(Duration::from_millis(1500)),
-                    |_| Message::ClearSnapshotToast,
-                )
+                self.active_media_menu_idx = None;
+                if let Some(info) = recorder::parse_avi_video(&path) {
+                    if let Some(loc) = info.frame_locations.first() {
+                        if let Some(jpeg) = recorder::read_frame_jpeg(&path, loc.0, loc.1) {
+                            self.viewer_image_handle = Some(image::Handle::from_bytes(jpeg));
+                        }
+                    }
+                    let fname = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+                    let total_secs = info.total_frames / info.fps.max(1) as usize;
+                    self.viewer_info_text = format!("{} • {} FPS • {} frames ({:02}:{:02})", fname, info.fps, info.total_frames, total_secs / 60, total_secs % 60);
+                    self.viewer_selected_path = Some(path.clone());
+                    self.viewer_video_state = Some(ViewerVideoState {
+                        path: path.clone(),
+                        fps: info.fps,
+                        frames: info.frame_locations,
+                        current_frame: 0,
+                        is_playing: true,
+                    });
+
+                    if let Some(id) = self.viewer_window_id {
+                        return window::gain_focus(id);
+                    } else {
+                        let (id, task) = window::open(window::Settings {
+                            icon: window::icon::from_file_data(APP_ICON_BYTES, None).ok(),
+                            decorations: false,
+                            transparent: false,
+                            size: iced::Size::new(960.0, 640.0),
+                            min_size: Some(iced::Size::new(480.0, 360.0)),
+                            resizable: true,
+                            ..Default::default()
+                        });
+                        self.viewer_window_id = Some(id);
+                        return task.map(Message::ViewerWindowOpened);
+                    }
+                } else {
+                    let path_str = path.to_string_lossy().to_string();
+                    let _ = std::process::Command::new("cmd")
+                        .args(["/C", "start", "", &path_str])
+                        .spawn();
+                    Task::none()
+                }
+            }
+
+            Message::VideoViewerTick => {
+                if let Some(ref mut state) = self.viewer_video_state {
+                    if state.is_playing && !state.frames.is_empty() {
+                        state.current_frame = (state.current_frame + 1) % state.frames.len();
+                        let (offset, len) = state.frames[state.current_frame];
+                        if let Some(jpeg) = recorder::read_frame_jpeg(&state.path, offset, len) {
+                            self.viewer_image_handle = Some(image::Handle::from_bytes(jpeg));
+                        }
+                    }
+                }
+                Task::none()
+            }
+
+            Message::ToggleVideoPlayback => {
+                if let Some(ref mut state) = self.viewer_video_state {
+                    state.is_playing = !state.is_playing;
+                }
+                Task::none()
+            }
+
+            Message::SeekVideo(frame_idx) => {
+                if let Some(ref mut state) = self.viewer_video_state {
+                    let max_idx = state.frames.len().saturating_sub(1);
+                    state.current_frame = frame_idx.min(max_idx);
+                    let (offset, len) = state.frames[state.current_frame];
+                    if let Some(jpeg) = recorder::read_frame_jpeg(&state.path, offset, len) {
+                        self.viewer_image_handle = Some(image::Handle::from_bytes(jpeg));
+                    }
+                }
+                Task::none()
+            }
+
+            Message::ReplayVideo => {
+                if let Some(ref mut state) = self.viewer_video_state {
+                    state.current_frame = 0;
+                    state.is_playing = true;
+                    if let Some(loc) = state.frames.first() {
+                        if let Some(jpeg) = recorder::read_frame_jpeg(&state.path, loc.0, loc.1) {
+                            self.viewer_image_handle = Some(image::Handle::from_bytes(jpeg));
+                        }
+                    }
+                }
+                Task::none()
             }
 
             Message::MediaHovered(idx) => {
@@ -784,6 +886,7 @@ impl AutoCamApp {
 
             Message::OpenViewerWindow(path) => {
                 self.active_media_menu_idx = None;
+                self.viewer_video_state = None;
                 if let Ok(bytes) = std::fs::read(&path) {
                     if let Ok(img) = ::image::load_from_memory(&bytes) {
                         let w = img.width();
@@ -817,6 +920,7 @@ impl AutoCamApp {
             Message::CloseViewerWindow => {
                 self.viewer_image_handle = None;
                 self.viewer_selected_path = None;
+                self.viewer_video_state = None;
                 if let Some(id) = self.viewer_window_id.take() {
                     window::close(id)
                 } else {
@@ -836,6 +940,8 @@ impl AutoCamApp {
             Message::ResizeWindow(id, direction) => window::drag_resize(id, direction),
 
             Message::MinimizeWindow(id) => window::minimize(id, true),
+
+            Message::ToggleMaximizeWindow(id) => window::toggle_maximize(id),
 
             Message::FrameReceived(frame) => {
                 self.is_loading_camera = false;
@@ -1574,18 +1680,7 @@ impl AutoCamApp {
                         tooltip::Position::Bottom,
                     ),
                     toolbar_divider(),
-                    render_icon_btn(
-                        if self.is_fullscreen {
-                            icons::ICON_MINIMIZE_2
-                        } else {
-                            icons::ICON_MAXIMIZE
-                        },
-                        "Fullscreen [F11]",
-                        Message::ToggleFullscreen,
-                        self.is_fullscreen,
-                        false,
-                        tooltip::Position::Bottom,
-                    ),
+                    // Minimize (_)
                     render_icon_btn(
                         icons::ICON_MINUS,
                         "Minimize",
@@ -1594,6 +1689,16 @@ impl AutoCamApp {
                         false,
                         tooltip::Position::Bottom,
                     ),
+                    // Maximize ([])
+                    render_icon_btn(
+                        icons::ICON_SQUARE,
+                        "Maximize / Restore",
+                        Message::ToggleMaximizeWindow(window_id),
+                        false,
+                        false,
+                        tooltip::Position::Bottom,
+                    ),
+                    // Close (X)
                     render_icon_btn(
                         icons::ICON_CLOSE,
                         "Close",
@@ -2093,6 +2198,14 @@ impl AutoCamApp {
                         tooltip::Position::Bottom,
                     ),
                     render_icon_btn(
+                        icons::ICON_SQUARE,
+                        "Maximize / Restore",
+                        Message::ToggleMaximizeWindow(window_id),
+                        false,
+                        false,
+                        tooltip::Position::Bottom,
+                    ),
+                    render_icon_btn(
                         icons::ICON_CLOSE,
                         "Close Album [Esc]",
                         Message::CloseAlbumWindow,
@@ -2303,7 +2416,7 @@ impl AutoCamApp {
                             MediaKind::Video => button(
                                 row![
                                     render_svg(icons::ICON_PLAY, 12.0, true, false),
-                                    text("เล่นวิดีโอ").size(11).color(Color::WHITE),
+                                    text("Play Video").size(11).color(Color::WHITE),
                                 ]
                                 .spacing(6)
                                 .align_y(Alignment::Center),
@@ -2317,7 +2430,7 @@ impl AutoCamApp {
                             MediaKind::Photo => button(
                                 row![
                                     render_svg(icons::ICON_CAMERA, 12.0, true, false),
-                                    text("ดูรูปภาพ").size(11).color(Color::WHITE),
+                                    text("View Photo").size(11).color(Color::WHITE),
                                 ]
                                 .spacing(6)
                                 .align_y(Alignment::Center),
@@ -2335,7 +2448,7 @@ impl AutoCamApp {
                                 button(
                                     row![
                                         render_svg(icons::ICON_FOLDER, 12.0, true, false),
-                                        text("เปิดใน explorer").size(11).color(Color::WHITE),
+                                        text("Show in Explorer").size(11).color(Color::WHITE),
                                     ]
                                     .spacing(6)
                                     .align_y(Alignment::Center),
@@ -2348,7 +2461,7 @@ impl AutoCamApp {
                                 button(
                                     row![
                                         render_svg(icons::ICON_COPY, 12.0, true, false),
-                                        text("copy").size(11).color(Color::WHITE),
+                                        text("Copy Media").size(11).color(Color::WHITE),
                                     ]
                                     .spacing(6)
                                     .align_y(Alignment::Center),
@@ -2361,7 +2474,7 @@ impl AutoCamApp {
                                 button(
                                     row![
                                         render_svg(icons::ICON_COPY, 12.0, true, false),
-                                        text("copy path").size(11).color(Color::WHITE),
+                                        text("Copy Path").size(11).color(Color::WHITE),
                                     ]
                                     .spacing(6)
                                     .align_y(Alignment::Center),
@@ -2374,7 +2487,7 @@ impl AutoCamApp {
                                 button(
                                     row![
                                         render_svg(icons::ICON_TRASH, 12.0, true, true),
-                                        text("delete").size(11).color(Color::WHITE),
+                                        text("Delete").size(11).color(Color::WHITE),
                                     ]
                                     .spacing(6)
                                     .align_y(Alignment::Center),
@@ -2455,13 +2568,14 @@ impl AutoCamApp {
         with_resize_handles(root, window_id)
     }
 
-    /// PHOTO VIEWER WINDOW VIEW:
-    /// Dedicated window displaying full resolution captured photo with dark backdrop
+    /// MEDIA VIEWER WINDOW VIEW:
+    /// Dedicated window displaying full resolution captured photo or native video playback with dark backdrop
     fn view_viewer_window(&self, window_id: window::Id) -> Element<'_, Message> {
+        let is_video = self.viewer_video_state.is_some();
         let header = mouse_area(
             container(
                 row![
-                    render_svg(icons::ICON_CAMERA, 16.0, true, false),
+                    render_svg(if is_video { icons::ICON_VIDEO } else { icons::ICON_CAMERA }, 16.0, true, false),
                     text(&self.viewer_info_text)
                         .size(12)
                         .color(theme::COLOR_TEXT),
@@ -2481,7 +2595,7 @@ impl AutoCamApp {
                     if let Some(ref path) = self.viewer_selected_path {
                         render_icon_btn(
                             icons::ICON_COPY,
-                            "Copy Image to Clipboard",
+                            if is_video { "Copy Video to Clipboard" } else { "Copy Image to Clipboard" },
                             Message::CopyMedia(path.clone()),
                             false,
                             false,
@@ -2494,6 +2608,14 @@ impl AutoCamApp {
                         icons::ICON_MINUS,
                         "Minimize",
                         Message::MinimizeWindow(window_id),
+                        false,
+                        false,
+                        tooltip::Position::Bottom,
+                    ),
+                    render_icon_btn(
+                        icons::ICON_SQUARE,
+                        "Maximize / Restore",
+                        Message::ToggleMaximizeWindow(window_id),
                         false,
                         false,
                         tooltip::Position::Bottom,
@@ -2530,12 +2652,69 @@ impl AutoCamApp {
             .center(Fill)
             .into()
         } else {
-            container(text("No image loaded").size(12).color(theme::COLOR_TEXT_MUTED))
+            container(text(if is_video { "Loading video..." } else { "No image loaded" }).size(12).color(theme::COLOR_TEXT_MUTED))
                 .center(Fill)
                 .into()
         };
 
-        let content = column![header, image_viewport]
+        let main_viewport: Element<'_, Message> = if let Some(ref v) = self.viewer_video_state {
+            let cur_secs = v.current_frame / v.fps.max(1) as usize;
+            let total_secs = v.frames.len() / v.fps.max(1) as usize;
+            let time_str = format!("{:02}:{:02} / {:02}:{:02}", cur_secs / 60, cur_secs % 60, total_secs / 60, total_secs % 60);
+
+            let playback_bar = container(
+                row![
+                    render_icon_btn(
+                        if v.is_playing { icons::ICON_PAUSE } else { icons::ICON_PLAY },
+                        if v.is_playing { "Pause" } else { "Play" },
+                        Message::ToggleVideoPlayback,
+                        v.is_playing,
+                        false,
+                        tooltip::Position::Top,
+                    ),
+                    render_icon_btn(
+                        icons::ICON_REFRESH,
+                        "Replay from Beginning",
+                        Message::ReplayVideo,
+                        false,
+                        false,
+                        tooltip::Position::Top,
+                    ),
+                    text(time_str).size(11).color(Color::WHITE),
+                    slider(
+                        0.0..=(v.frames.len().saturating_sub(1) as f32),
+                        v.current_frame as f32,
+                        |val| Message::SeekVideo(val as usize),
+                    )
+                    .step(1.0)
+                    .style(theme::clean_slider_style)
+                    .width(Length::Fixed(280.0)),
+                ]
+                .spacing(8)
+                .align_y(Alignment::Center)
+                .padding([6, 14]),
+            )
+            .style(theme::controls_panel_style);
+
+            stack![
+                image_viewport,
+                column![
+                    Space::new().height(Fill),
+                    container(playback_bar)
+                        .padding(iced::Padding { top: 0.0, right: 0.0, bottom: 16.0, left: 0.0 })
+                        .center_x(Fill),
+                ]
+                .width(Fill)
+                .height(Fill),
+            ]
+            .width(Fill)
+            .height(Fill)
+            .into()
+        } else {
+            image_viewport
+        };
+
+        let content = column![header, main_viewport]
             .width(Fill)
             .height(Fill);
 
@@ -3125,14 +3304,16 @@ fn render_icon_btn<'a>(
 
 /// Helper function to create a sleek vertical divider '|'
 fn toolbar_divider<'a>() -> Element<'a, Message> {
-    container(Space::new().width(Length::Fixed(1.0)).height(Length::Fixed(14.0)))
-        .style(|_: &Theme| container::Style {
-            background: Some(Background::Color(Color::from_rgba(1.0, 1.0, 1.0, 0.25))),
-            ..Default::default()
-        })
-        .padding([0, 2])
-        .align_y(Alignment::Center)
-        .into()
+    container(
+        container(Space::new().width(Length::Fixed(1.0)).height(Length::Fixed(12.0)))
+            .style(|_: &Theme| container::Style {
+                background: Some(Background::Color(Color::from_rgba(1.0, 1.0, 1.0, 0.18))),
+                ..Default::default()
+            })
+    )
+    .padding([0, 1])
+    .align_y(Alignment::Center)
+    .into()
 }
 
 /// Borderless Window Responsive Resize Handles for multi-window

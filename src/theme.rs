@@ -140,11 +140,15 @@ pub fn settings_inner_box_style(_theme: &Theme) -> container::Style {
 }
 
 pub fn pick_list_style(_theme: &Theme, status: pick_list::Status) -> pick_list::Style {
-    let bg = match status {
-        pick_list::Status::Hovered | pick_list::Status::Opened { .. } => {
-            Background::Color(COLOR_SURFACE_MUTED)
-        }
-        _ => Background::Color(COLOR_SURFACE),
+    let (bg, border_color) = match status {
+        pick_list::Status::Hovered | pick_list::Status::Opened { .. } => (
+            Background::Color(Color::from_rgb(0.18, 0.18, 0.22)),
+            Color::from_rgb(0.45, 0.45, 0.52),
+        ),
+        _ => (
+            Background::Color(Color::from_rgb(0.11, 0.11, 0.13)),
+            Color::from_rgb(0.24, 0.24, 0.28),
+        ),
     };
 
     pick_list::Style {
@@ -153,8 +157,8 @@ pub fn pick_list_style(_theme: &Theme, status: pick_list::Status) -> pick_list::
         handle_color: COLOR_TEXT,
         background: bg,
         border: Border {
-            color: Color::TRANSPARENT,
-            width: 0.0,
+            color: border_color,
+            width: 1.0,
             radius: RADIUS_SM,
         },
     }
@@ -325,16 +329,16 @@ pub fn media_tile_style(_theme: &Theme) -> container::Style {
 
 pub fn media_menu_style(_theme: &Theme) -> container::Style {
     container::Style {
-        background: Some(Background::Color(Color::from_rgb(0.15, 0.15, 0.18))),
+        background: Some(Background::Color(Color::from_rgb(0.12, 0.12, 0.15))),
         border: Border {
-            color: Color::from_rgb(0.50, 0.50, 0.58),
+            color: Color::from_rgb(0.38, 0.38, 0.45),
             width: 1.0,
             radius: RADIUS_SM,
         },
         shadow: Shadow {
             color: Color::from_rgba(0.0, 0.0, 0.0, 0.90),
-            offset: iced::Vector::new(0.0, 6.0),
-            blur_radius: 16.0,
+            offset: iced::Vector::new(0.0, 4.0),
+            blur_radius: 14.0,
         },
         text_color: Some(Color::WHITE),
         ..Default::default()
@@ -367,27 +371,27 @@ pub fn media_menu_btn_style(is_danger: bool) -> impl Fn(&Theme, button::Status) 
         let (bg, text_color, border_color) = if is_danger {
             match status {
                 button::Status::Hovered | button::Status::Pressed => (
-                    Color::from_rgb(0.92, 0.22, 0.22),
+                    Color::from_rgb(0.85, 0.20, 0.20),
                     Color::WHITE,
                     Color::WHITE,
                 ),
                 _ => (
-                    Color::from_rgb(0.70, 0.16, 0.16),
-                    Color::WHITE,
-                    Color::from_rgb(0.85, 0.25, 0.25),
+                    Color::from_rgb(0.35, 0.11, 0.11),
+                    Color::from_rgb(0.98, 0.45, 0.45),
+                    Color::from_rgb(0.60, 0.18, 0.18),
                 ),
             }
         } else {
             match status {
                 button::Status::Hovered | button::Status::Pressed => (
-                    Color::from_rgb(0.35, 0.35, 0.44),
+                    Color::from_rgb(0.28, 0.28, 0.35),
                     Color::WHITE,
                     Color::WHITE,
                 ),
                 _ => (
-                    Color::from_rgb(0.22, 0.22, 0.27),
+                    Color::from_rgb(0.16, 0.16, 0.20),
                     Color::WHITE,
-                    Color::from_rgb(0.35, 0.35, 0.42),
+                    Color::from_rgb(0.28, 0.28, 0.34),
                 ),
             }
         };
