@@ -265,6 +265,7 @@ pub fn recording_button_style(_theme: &Theme, status: button::Status) -> button:
     }
 }
 
+#[allow(dead_code)]
 pub fn album_expanded_style(_theme: &Theme, status: button::Status) -> button::Style {
     let bg = match status {
         button::Status::Hovered | button::Status::Pressed => COLOR_ACTIVE_BG,
@@ -284,6 +285,7 @@ pub fn album_expanded_style(_theme: &Theme, status: button::Status) -> button::S
     }
 }
 
+#[allow(dead_code)]
 pub fn thumbnail_border_style(_theme: &Theme) -> container::Style {
     container::Style {
         background: Some(Background::Color(COLOR_BG)),
@@ -328,6 +330,88 @@ pub fn media_menu_style(_theme: &Theme) -> container::Style {
             blur_radius: 12.0,
         },
         text_color: Some(COLOR_TEXT),
+        ..Default::default()
+    }
+}
+
+pub fn dots_button_style(_theme: &Theme, status: button::Status) -> button::Style {
+    let bg = match status {
+        button::Status::Hovered | button::Status::Pressed => {
+            Color::from_rgba(0.25, 0.25, 0.28, 0.95)
+        }
+        _ => Color::from_rgba(0.08, 0.08, 0.10, 0.85),
+    };
+
+    button::Style {
+        background: Some(Background::Color(bg)),
+        text_color: Color::WHITE,
+        border: Border {
+            color: Color::WHITE,
+            width: 1.0,
+            radius: RADIUS_SM,
+        },
+        shadow: Shadow::default(),
+        ..Default::default()
+    }
+}
+
+pub fn media_menu_btn_style(is_danger: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
+    move |_theme, status| {
+        let (bg, text_color, border_color) = if is_danger {
+            match status {
+                button::Status::Hovered | button::Status::Pressed => (
+                    Color::from_rgb(0.95, 0.22, 0.22),
+                    Color::WHITE,
+                    Color::WHITE,
+                ),
+                _ => (
+                    Color::from_rgb(0.85, 0.20, 0.20),
+                    Color::WHITE,
+                    Color::TRANSPARENT,
+                ),
+            }
+        } else {
+            match status {
+                button::Status::Hovered | button::Status::Pressed => (
+                    Color::from_rgb(0.24, 0.24, 0.28),
+                    Color::WHITE,
+                    Color::from_rgb(0.6, 0.6, 0.65),
+                ),
+                _ => (
+                    Color::from_rgb(0.12, 0.12, 0.15),
+                    Color::WHITE,
+                    Color::TRANSPARENT,
+                ),
+            }
+        };
+
+        button::Style {
+            background: Some(Background::Color(bg)),
+            text_color,
+            border: Border {
+                color: border_color,
+                width: 1.0,
+                radius: RADIUS_SM,
+            },
+            shadow: Shadow::default(),
+            ..Default::default()
+        }
+    }
+}
+
+pub fn tooltip_image_preview_style(_theme: &Theme) -> container::Style {
+    container::Style {
+        background: Some(Background::Color(COLOR_BG)),
+        border: Border {
+            color: Color::WHITE,
+            width: 1.0,
+            radius: RADIUS_SM,
+        },
+        shadow: Shadow {
+            color: Color::from_rgba(0.0, 0.0, 0.0, 0.8),
+            offset: iced::Vector::new(0.0, 4.0),
+            blur_radius: 12.0,
+        },
         ..Default::default()
     }
 }

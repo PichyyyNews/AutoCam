@@ -1,5 +1,6 @@
 #![windows_subsystem = "windows"]
 
+mod audio;
 mod camera;
 mod db;
 mod face_detect;
@@ -269,6 +270,11 @@ pub struct AutoCamApp {
     recording_start_time: Option<Instant>,
     recording_elapsed_secs: u64,
 
+    // Audio / Microphone Controls
+    available_audio_devices: Vec<audio::AudioDeviceInfo>,
+    selected_audio_device: Option<audio::AudioDeviceInfo>,
+    is_mic_muted: bool,
+
     // Album & Media Gallery
     media_items: Vec<MediaItem>,
     latest_capture: Option<MediaItem>,
@@ -348,6 +354,10 @@ pub enum Message {
     // Video Recording
     ToggleRecording,
     RecordingTick,
+
+    // Audio / Microphone Messages
+    AudioDeviceSelected(audio::AudioDeviceInfo),
+    ToggleMicMute,
 
     // Album Window & Gallery Messages
     OpenAlbumWindow,
@@ -506,6 +516,15 @@ impl AutoCamApp {
         let media_items = scan_captures_folder();
         let latest_capture = media_items.first().cloned();
 
+        let audio_devices = audio::query_audio_input_devices();
+        let saved_audio_name = db_cfg.get("audio_device");
+        let selected_audio_device = if let Some(saved_name) = saved_audio_name {
+            audio_devices.iter().find(|d| &d.name == saved_name).cloned().or_else(|| audio_devices.first().cloned())
+        } else {
+            audio_devices.first().cloned()
+        };
+        let is_mic_muted = db_cfg.get("is_mic_muted").map(|v| v == "true").unwrap_or(false);
+
         let app = Self {
             main_window_id: Some(main_id),
             settings_window_id: None,
@@ -551,6 +570,11 @@ impl AutoCamApp {
             is_recording: false,
             recording_start_time: None,
             recording_elapsed_secs: 0,
+
+            // Audio / Microphone
+            available_audio_devices: audio_devices,
+            selected_audio_device,
+            is_mic_muted,
 
             // Album
             media_items,
@@ -823,6 +847,25 @@ impl AutoCamApp {
                 Task::none()
             }
 
+            Message::AudioDeviceSelected(dev) => {
+                self.selected_audio_device = Some(dev.clone());
+                db::set("audio_device", &dev.name);
+                Task::none()
+            }
+
+            Message::ToggleMicMute => {
+                self.is_mic_muted = !self.is_mic_muted;
+                db::set("is_mic_muted", &self.is_mic_muted.to_string());
+                self.snapshot_toast = Some((
+                    if self.is_mic_muted { "Microphone Muted".to_string() } else { "Microphone Unmuted".to_string() },
+                    Instant::now(),
+                ));
+                Task::perform(
+                    tokio::time::sleep(Duration::from_millis(1200)),
+                    |_| Message::ClearSnapshotToast,
+                )
+            }
+
             Message::ToggleRecording => {
                 if !self.is_recording {
                     let _ = std::fs::create_dir_all("captures");
@@ -844,9 +887,17 @@ impl AutoCamApp {
                             self.recording_start_time = Some(Instant::now());
                             self.recording_elapsed_secs = 0;
                             self.snapshot_toast = Some(("Recording started...".to_string(), Instant::now()));
+                            return Task::perform(
+                                tokio::time::sleep(Duration::from_millis(1200)),
+                                |_| Message::ClearSnapshotToast,
+                            );
                         }
                         Err(e) => {
                             self.snapshot_toast = Some((format!("Record error: {}", e), Instant::now()));
+                            return Task::perform(
+                                tokio::time::sleep(Duration::from_millis(2000)),
+                                |_| Message::ClearSnapshotToast,
+                            );
                         }
                     }
                 } else {
@@ -860,8 +911,11 @@ impl AutoCamApp {
                         }
                     }
                     self.refresh_media_items();
+                    return Task::perform(
+                        tokio::time::sleep(Duration::from_millis(1500)),
+                        |_| Message::ClearSnapshotToast,
+                    );
                 }
-                Task::none()
             }
 
             Message::ClearSnapshotToast => {
@@ -1463,6 +1517,32 @@ impl AutoCamApp {
                         false,
                         tooltip::Position::Bottom,
                     ),
+                    Space::new().width(Length::Fixed(6.0)),
+                    // Microphone Device Selector & Mute Toggle
+                    pick_list(
+                        self.available_audio_devices.clone(),
+                        self.selected_audio_device.clone(),
+                        Message::AudioDeviceSelected,
+                    )
+                    .style(theme::pick_list_style)
+                    .text_size(11)
+                    .padding([3, 8]),
+                    render_icon_btn(
+                        if self.is_mic_muted {
+                            icons::ICON_MIC_OFF
+                        } else {
+                            icons::ICON_MIC
+                        },
+                        if self.is_mic_muted {
+                            "Unmute Microphone"
+                        } else {
+                            "Mute Microphone"
+                        },
+                        Message::ToggleMicMute,
+                        self.is_mic_muted,
+                        self.is_mic_muted,
+                        tooltip::Position::Bottom,
+                    ),
                     Space::new().width(Fill),
                     // PiP Switcher
                     render_icon_btn(
@@ -1710,80 +1790,51 @@ impl AutoCamApp {
             )
         };
 
-        // 3.2 Bottom-Right Album Button with Hover Preview Expansion
-        let album_btn: Element<'_, Message> = if self.album_hovered {
-            let thumb: Element<'_, Message> = if let Some(ref item) = self.latest_capture {
-                if let Some(ref handle) = item.thumbnail_handle {
-                    container(
-                        image(handle)
-                            .content_fit(ContentFit::Cover)
-                            .width(Length::Fixed(22.0))
-                            .height(Length::Fixed(22.0)),
-                    )
-                    .style(theme::thumbnail_border_style)
-                    .into()
-                } else if item.kind == MediaKind::Video {
-                    container(render_svg(icons::ICON_VIDEO, 16.0, true, false))
-                        .padding([2, 4])
-                        .into()
-                } else {
-                    render_svg(icons::ICON_ALBUM, 16.0, true, false)
-                }
-            } else {
-                render_svg(icons::ICON_ALBUM, 16.0, true, false)
-            };
-
-            // Expanded preview pill
-            mouse_area(
-                button(
-                    row![
-                        thumb,
-                        column![
-                            text(if self.latest_capture.is_some() { "Latest Capture" } else { "Album" })
-                                .size(9)
-                                .color(theme::COLOR_TEXT_MUTED),
-                            text(if let Some(ref item) = self.latest_capture {
-                                if item.filename.len() > 14 {
-                                    format!("{}...", &item.filename[..11])
-                                } else {
-                                    item.filename.clone()
-                                }
-                            } else {
-                                "Gallery Empty".to_string()
-                            })
-                            .size(10)
-                            .color(theme::COLOR_TEXT),
-                        ]
-                        .spacing(1),
-                    ]
-                    .spacing(6)
-                    .align_y(Alignment::Center),
+        // 3.2 Bottom-Right Album Button with Floating Thumbnail Hover Preview (No Text, No Layout Shift)
+        let tooltip_preview: Element<'_, Message> = if let Some(ref item) = self.latest_capture {
+            if let Some(ref handle) = item.thumbnail_handle {
+                container(
+                    image(handle)
+                        .content_fit(ContentFit::Cover)
+                        .width(Length::Fixed(120.0))
+                        .height(Length::Fixed(80.0)),
                 )
-                .on_press(Message::OpenAlbumWindow)
-                .style(theme::album_expanded_style)
-                .padding([3, 8]),
-            )
-            .on_enter(Message::AlbumHovered(true))
-            .on_exit(Message::AlbumHovered(false))
-            .into()
+                .style(theme::tooltip_image_preview_style)
+                .into()
+            } else if item.kind == MediaKind::Video {
+                container(
+                    column![
+                        render_svg(icons::ICON_VIDEO, 26.0, true, false),
+                        Space::new().height(Length::Fixed(4.0)),
+                        text(format_size(item.size_bytes)).size(10).color(Color::WHITE),
+                    ]
+                    .align_x(Alignment::Center),
+                )
+                .padding([12, 18])
+                .style(theme::tooltip_image_preview_style)
+                .into()
+            } else {
+                container(text("No Captures").size(11).color(Color::WHITE))
+                    .padding([4, 8])
+                    .style(theme::tooltip_style)
+                    .into()
+            }
         } else {
-            // Normal icon button
-            mouse_area(
-                tooltip(
-                    button(render_svg(icons::ICON_ALBUM, 15.0, false, false))
-                        .on_press(Message::OpenAlbumWindow)
-                        .style(theme::clean_button_style(false, false))
-                        .padding([5, 7]),
-                    container(text("Open Album / Gallery").size(11))
-                        .padding([3, 7])
-                        .style(theme::tooltip_style),
-                    tooltip::Position::Top,
-                ),
-            )
-            .on_enter(Message::AlbumHovered(true))
-            .on_exit(Message::AlbumHovered(false))
-            .into()
+            container(text("No Captures").size(11).color(Color::WHITE))
+                .padding([4, 8])
+                .style(theme::tooltip_style)
+                .into()
         };
+
+        let album_btn: Element<'_, Message> = tooltip(
+            button(render_svg(icons::ICON_ALBUM, 15.0, false, false))
+                .on_press(Message::OpenAlbumWindow)
+                .style(theme::clean_button_style(false, false))
+                .padding([5, 7]),
+            tooltip_preview,
+            tooltip::Position::Top,
+        )
+        .into();
 
         let toolbar = container(
             row![
@@ -2138,12 +2189,12 @@ impl AutoCamApp {
                             .height(Fill),
                     );
 
-                    // 3-Dots Button in Top-Right
+                    // 3-Dots Button in Top-Right with White Border
                     if is_hovered || is_menu_open {
                         let dots_btn: Element<'_, Message> = container(
-                            button(render_svg(icons::ICON_MORE_HORIZONTAL, 14.0, is_menu_open, false))
+                            button(render_svg(icons::ICON_MORE_HORIZONTAL, 14.0, true, false))
                                 .on_press(Message::ToggleMediaMenu(Some(idx)))
-                                .style(theme::clean_button_style(is_menu_open, false))
+                                .style(theme::dots_button_style)
                                 .padding([4, 6]),
                         )
                         .padding([4, 4])
@@ -2162,58 +2213,58 @@ impl AutoCamApp {
                             column![
                                 button(
                                     row![
-                                        render_svg(icons::ICON_FOLDER, 13.0, false, false),
-                                        text("เปิดใน explorer").size(11),
+                                        render_svg(icons::ICON_FOLDER, 13.0, true, false),
+                                        text("เปิดใน explorer").size(11).color(Color::WHITE),
                                     ]
                                     .spacing(6)
                                     .align_y(Alignment::Center),
                                 )
                                 .on_press(Message::OpenInExplorer(item.path.clone()))
-                                .style(theme::clean_button_style(false, false))
-                                .padding([4, 8])
+                                .style(theme::media_menu_btn_style(false))
+                                .padding([5, 8])
                                 .width(Fill),
 
                                 button(
                                     row![
-                                        render_svg(icons::ICON_COPY, 13.0, false, false),
-                                        text("copy").size(11),
+                                        render_svg(icons::ICON_COPY, 13.0, true, false),
+                                        text("copy").size(11).color(Color::WHITE),
                                     ]
                                     .spacing(6)
                                     .align_y(Alignment::Center),
                                 )
                                 .on_press(Message::CopyMedia(item.path.clone()))
-                                .style(theme::clean_button_style(false, false))
-                                .padding([4, 8])
+                                .style(theme::media_menu_btn_style(false))
+                                .padding([5, 8])
                                 .width(Fill),
 
                                 button(
                                     row![
-                                        render_svg(icons::ICON_COPY, 13.0, false, false),
-                                        text("copy path").size(11),
+                                        render_svg(icons::ICON_COPY, 13.0, true, false),
+                                        text("copy path").size(11).color(Color::WHITE),
                                     ]
                                     .spacing(6)
                                     .align_y(Alignment::Center),
                                 )
                                 .on_press(Message::CopyMediaPath(item.path.clone()))
-                                .style(theme::clean_button_style(false, false))
-                                .padding([4, 8])
+                                .style(theme::media_menu_btn_style(false))
+                                .padding([5, 8])
                                 .width(Fill),
 
                                 button(
                                     row![
-                                        render_svg(icons::ICON_TRASH, 13.0, false, true),
-                                        text("delete").size(11),
+                                        render_svg(icons::ICON_TRASH, 13.0, true, true),
+                                        text("delete").size(11).color(Color::WHITE),
                                     ]
                                     .spacing(6)
                                     .align_y(Alignment::Center),
                                 )
                                 .on_press(Message::DeleteMedia(item.path.clone()))
-                                .style(theme::clean_button_style(false, true))
-                                .padding([4, 8])
+                                .style(theme::media_menu_btn_style(true))
+                                .padding([5, 8])
                                 .width(Fill),
                             ]
-                            .spacing(2)
-                            .padding([4, 4]),
+                            .spacing(3)
+                            .padding([5, 5]),
                         )
                         .style(theme::media_menu_style)
                         .width(Length::Fixed(150.0))
