@@ -6,6 +6,7 @@ use iced::keyboard::{self, key, Key};
 use iced::widget::{button, column, container, image, mouse_area, pick_list, row, text, Space};
 use iced::window;
 use iced::{Alignment, ContentFit, Element, Fill, Length, Subscription, Task};
+use std::time::Duration;
 
 pub struct AutoCamApp {
     camera_manager: Option<CameraManager>,
@@ -84,7 +85,7 @@ impl AutoCamApp {
 
     pub fn subscription(&self) -> Subscription<Message> {
         Subscription::batch(vec![
-            window::frames().map(|_| Message::Tick),
+            iced::time::every(Duration::from_millis(33)).map(|_| Message::Tick),
             keyboard::listen().map(Message::KeyboardEvent),
         ])
     }
@@ -148,7 +149,7 @@ impl AutoCamApp {
                 if let Some(ref mgr) = self.camera_manager {
                     mgr.send(CameraControl::SwitchResolution(self.resolution));
                 }
-                self.status_text = format!("Resolution set to {}", self.resolution.label());
+                self.status_text = format!("Resolution: {}", self.resolution.label());
                 Task::none()
             }
 
@@ -268,7 +269,7 @@ impl AutoCamApp {
 
     /// Full Normal Mode with Custom Draggable Title Bar and Circuit Teaching Tools
     fn view_normal(&self) -> Element<'_, Message> {
-        // 1. Draggable Top Title Bar
+        // 1. Draggable Top Title Bar (Flush with window edges)
         let title_bar = mouse_area(
             container(
                 row![
@@ -311,7 +312,7 @@ impl AutoCamApp {
                 ]
                 .spacing(8)
                 .align_y(Alignment::Center)
-                .padding([6, 12]),
+                .padding([8, 12]),
             )
             .style(theme::title_bar_style)
             .width(Fill),
@@ -343,8 +344,7 @@ impl AutoCamApp {
         let video_viewport = container(video_content)
             .style(theme::video_viewport_style)
             .width(Fill)
-            .height(Fill)
-            .padding(1);
+            .height(Fill);
 
         // 3. Circuit Teaching Controls Toolbar
         let toolbar = container(
@@ -394,8 +394,8 @@ impl AutoCamApp {
         .width(Fill);
 
         let content = column![title_bar, video_viewport, toolbar,]
-            .spacing(10)
-            .padding(10);
+            .width(Fill)
+            .height(Fill);
 
         container(content)
             .style(theme::root_window_style)
@@ -469,7 +469,7 @@ fn main() -> iced::Result {
         .subscription(AutoCamApp::subscription)
         .window(window::Settings {
             decorations: false,
-            transparent: false,
+            transparent: true,
             size: iced::Size::new(960.0, 600.0),
             resizable: true,
             ..Default::default()

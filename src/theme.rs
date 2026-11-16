@@ -1,7 +1,7 @@
 use iced::border::Radius;
 use iced::widget::button;
 use iced::widget::container;
-use iced::{Background, Border, Color, Shadow, Theme, Vector};
+use iced::{Background, Border, Color, Shadow, Theme};
 
 // Semantic Color Tokens from clean-ui-design
 pub const COLOR_BG: Color = Color::from_rgb(0.070, 0.070, 0.078); // #121214
@@ -16,40 +16,22 @@ pub const COLOR_DANGER: Color = Color::from_rgb(0.937, 0.267, 0.267); // #ef4444
 
 // Radius Tokens
 pub const RADIUS_SM: Radius = Radius {
-    top_left: 6.0,
-    top_right: 6.0,
-    bottom_right: 6.0,
-    bottom_left: 6.0,
+    top_left: 4.0,
+    top_right: 4.0,
+    bottom_right: 4.0,
+    bottom_left: 4.0,
 };
 
-pub const RADIUS_MD: Radius = Radius {
-    top_left: 8.0,
-    top_right: 8.0,
-    bottom_right: 8.0,
-    bottom_left: 8.0,
-};
-
-pub const RADIUS_LG: Radius = Radius {
-    top_left: 12.0,
-    top_right: 12.0,
-    bottom_right: 12.0,
-    bottom_left: 12.0,
-};
-
-// Clean UI Styles
+// Root Window Style - Zero white border, 100% flush rectangular dark frame
 pub fn root_window_style(_theme: &Theme) -> container::Style {
     container::Style {
         background: Some(Background::Color(COLOR_BG)),
         border: Border {
             color: COLOR_BORDER,
             width: 1.0,
-            radius: RADIUS_LG,
+            radius: Radius::default(),
         },
-        shadow: Shadow {
-            color: Color::from_rgba(0.0, 0.0, 0.0, 0.35),
-            offset: Vector::new(0.0, 4.0),
-            blur_radius: 12.0,
-        },
+        shadow: Shadow::default(),
         text_color: Some(COLOR_TEXT),
         ..Default::default()
     }
@@ -61,12 +43,7 @@ pub fn title_bar_style(_theme: &Theme) -> container::Style {
         border: Border {
             color: COLOR_BORDER,
             width: 1.0,
-            radius: Radius {
-                top_left: 11.0,
-                top_right: 11.0,
-                bottom_left: 0.0,
-                bottom_right: 0.0,
-            },
+            radius: Radius::default(),
         },
         text_color: Some(COLOR_TEXT),
         ..Default::default()
@@ -76,12 +53,12 @@ pub fn title_bar_style(_theme: &Theme) -> container::Style {
 pub fn pip_overlay_title_bar_style(_theme: &Theme) -> container::Style {
     container::Style {
         background: Some(Background::Color(Color::from_rgba(
-            0.07, 0.07, 0.08, 0.85,
+            0.07, 0.07, 0.08, 0.90,
         ))),
         border: Border {
             color: COLOR_BORDER,
             width: 1.0,
-            radius: RADIUS_MD,
+            radius: Radius::default(),
         },
         text_color: Some(COLOR_TEXT),
         ..Default::default()
@@ -90,12 +67,8 @@ pub fn pip_overlay_title_bar_style(_theme: &Theme) -> container::Style {
 
 pub fn video_viewport_style(_theme: &Theme) -> container::Style {
     container::Style {
-        background: Some(Background::Color(Color::BLACK)),
-        border: Border {
-            color: COLOR_BORDER,
-            width: 1.0,
-            radius: RADIUS_MD,
-        },
+        background: Some(Background::Color(COLOR_BG)),
+        text_color: Some(COLOR_TEXT),
         ..Default::default()
     }
 }
@@ -106,7 +79,7 @@ pub fn controls_panel_style(_theme: &Theme) -> container::Style {
         border: Border {
             color: COLOR_BORDER,
             width: 1.0,
-            radius: RADIUS_MD,
+            radius: Radius::default(),
         },
         text_color: Some(COLOR_TEXT),
         ..Default::default()

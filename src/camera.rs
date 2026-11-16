@@ -141,12 +141,23 @@ impl Drop for CameraManager {
 fn open_camera(device_idx: u32, resolution: VideoResolution) -> Option<Camera> {
     let (w, h) = resolution.dimensions();
     let index = CameraIndex::Index(device_idx);
-    let requested = RequestedFormat::new::<RgbAFormat>(RequestedFormatType::Closest(
-        CameraFormat::new(Resolution::new(w, h), FrameFormat::MJPEG, 30),
+
+    // Prefer NV12 (direct raw video, hardware accelerated, no dropped JPEG packets)
+    // with automatic fallback to MJPEG
+    let requested_nv12 = RequestedFormat::new::<RgbAFormat>(RequestedFormatType::Closest(
+        CameraFormat::new(Resolution::new(w, h), FrameFormat::NV12, 30),
     ));
 
-    let mut camera = Camera::new(index, requested).ok()?;
+    let camera_res = Camera::new(index.clone(), requested_nv12).or_else(|_| {
+        let requested_mjpeg = RequestedFormat::new::<RgbAFormat>(RequestedFormatType::Closest(
+            CameraFormat::new(Resolution::new(w, h), FrameFormat::MJPEG, 30),
+        ));
+        Camera::new(index, requested_mjpeg)
+    });
+
+    let mut camera = camera_res.ok()?;
     camera.open_stream().ok()?;
+    let _ = camera.set_frame_rate(30);
     Some(camera)
 }
 
@@ -193,7 +204,7 @@ fn run_capture_loop(
 
         // If frozen, sleep lightly to conserve CPU/RAM without querying camera
         if is_frozen {
-            thread::sleep(Duration::from_millis(60));
+            thread::sleep(Duration::from_millis(50));
             continue;
         }
 
@@ -234,8 +245,8 @@ fn run_capture_loop(
                     }
                 }
                 Err(_) => {
-                    // Slight delay on frame grab failure
-                    thread::sleep(Duration::from_millis(15));
+                    // Slight delay only on frame grab error
+                    thread::sleep(Duration::from_millis(8));
                 }
             }
         } else {
@@ -244,8 +255,7 @@ fn run_capture_loop(
             camera = open_camera(current_device, current_res);
         }
 
-        // Target ~30 FPS
-        thread::sleep(Duration::from_millis(25));
+        // Do NOT sleep here! cam.frame() blocks at camera hardware sync
     }
 }
 
