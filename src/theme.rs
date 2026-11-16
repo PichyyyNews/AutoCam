@@ -2,6 +2,7 @@ use iced::border::Radius;
 use iced::widget::button;
 use iced::widget::container;
 use iced::widget::pick_list;
+use iced::widget::slider;
 use iced::{Background, Border, Color, Shadow, Theme};
 
 // Semantic Monochrome Tokens from clean-ui-design (Strict black & white / zinc)
@@ -217,5 +218,28 @@ pub fn clean_button_style(
             shadow: Shadow::default(),
             ..Default::default()
         }
+    }
+}
+
+pub fn clean_slider_style(_theme: &Theme, _status: slider::Status) -> slider::Style {
+    slider::Style {
+        rail: slider::Rail {
+            backgrounds: (
+                Background::Color(COLOR_TEXT),           // Crisp white for active/filled rail!
+                Background::Color(COLOR_SURFACE_MUTED),  // Dark zinc for unfilled rail!
+            ),
+            width: 3.5,
+            border: Border {
+                radius: RADIUS_SM,
+                width: 0.0,
+                color: Color::TRANSPARENT,
+            },
+        },
+        handle: slider::Handle {
+            shape: slider::HandleShape::Circle { radius: 6.5 },
+            background: Background::Color(Color::WHITE),
+            border_width: 1.0,
+            border_color: COLOR_BORDER,
+        },
     }
 }

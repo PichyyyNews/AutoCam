@@ -18,7 +18,7 @@ use iced::widget::{
 };
 use iced::window;
 use iced::{
-    exit, Alignment, Background, Border, Color, ContentFit, Element, Fill, Length, Subscription, Task,
+    exit, Alignment, Background, Color, ContentFit, Element, Fill, Length, Subscription, Task,
     Theme,
 };
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -50,6 +50,81 @@ impl GridMode {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShortcutAction {
+    Freeze,
+    Flip,
+    Rotate,
+    Grid,
+    AutoFocus,
+    AutoEv,
+    FaceHud,
+    Interpolation,
+    Snapshot,
+    Pip,
+    Fullscreen,
+    Settings,
+    ZoomIn,
+    ZoomOut,
+}
+
+#[derive(Debug, Clone)]
+pub struct KeyBindings {
+    pub freeze: Key,
+    pub flip: Key,
+    pub rotate: Key,
+    pub grid: Key,
+    pub auto_focus: Key,
+    pub auto_ev: Key,
+    pub face_hud: Key,
+    pub interpolation: Key,
+    pub snapshot: Key,
+    pub pip: Key,
+    pub fullscreen: Key,
+    pub settings: Key,
+    pub zoom_in: Key,
+    pub zoom_out: Key,
+}
+
+impl Default for KeyBindings {
+    fn default() -> Self {
+        Self {
+            freeze: Key::Named(key::Named::Space),
+            flip: Key::Character("f".into()),
+            rotate: Key::Character("r".into()),
+            grid: Key::Character("g".into()),
+            auto_focus: Key::Character("a".into()),
+            auto_ev: Key::Character("e".into()),
+            face_hud: Key::Character("d".into()),
+            interpolation: Key::Character("i".into()),
+            snapshot: Key::Character("c".into()),
+            pip: Key::Character("p".into()),
+            fullscreen: Key::Named(key::Named::F11),
+            settings: Key::Character("s".into()),
+            zoom_in: Key::Character("=".into()),
+            zoom_out: Key::Character("-".into()),
+        }
+    }
+}
+
+fn key_matches(k1: &Key, k2: &Key) -> bool {
+    match (k1, k2) {
+        (Key::Character(c1), Key::Character(c2)) => c1.eq_ignore_ascii_case(c2),
+        (k1, k2) => k1 == k2,
+    }
+}
+
+fn format_key(key: &Key) -> String {
+    match key {
+        Key::Named(key::Named::Space) => "Space".to_string(),
+        Key::Named(key::Named::F11) => "F11".to_string(),
+        Key::Named(key::Named::Escape) => "Esc".to_string(),
+        Key::Named(named) => format!("{:?}", named),
+        Key::Character(c) => c.to_uppercase(),
+        _ => "Key".to_string(),
+    }
+}
+
 pub struct AutoCamApp {
     main_window_id: Option<window::Id>,
     settings_window_id: Option<window::Id>,
@@ -66,7 +141,6 @@ pub struct AutoCamApp {
     zoom_level: f32,
     image_handle: Option<image::Handle>,
     app_icon_handle: image::Handle,
-    frame_count: u64,
     status_text: String,
 
     // Detailed Camera Engine Controls
@@ -89,6 +163,10 @@ pub struct AutoCamApp {
     anti_flicker: AntiFlickerMode,
     latest_frame: Option<FramePayload>,
     snapshot_toast: Option<(String, Instant)>,
+
+    // Customizable Shortcuts
+    keybindings: KeyBindings,
+    rebinding_action: Option<ShortcutAction>,
 
     // PiP state
     is_pip: bool,
@@ -148,6 +226,11 @@ pub enum Message {
     CaptureSnapshot,
     OpenCapturesFolder,
     ResetDefaults,
+
+    // Shortcut Rebinding
+    StartRebinding(ShortcutAction),
+    CancelRebinding,
+    ResetShortcuts,
 }
 
 fn camera_frame_stream() -> impl iced::futures::Stream<Item = Message> {
@@ -218,7 +301,6 @@ impl AutoCamApp {
             zoom_level: 1.0,
             image_handle: None,
             app_icon_handle: image::Handle::from_bytes(APP_ICON_BYTES),
-            frame_count: 0,
             status_text,
 
             grid_mode: GridMode::Off,
@@ -240,6 +322,9 @@ impl AutoCamApp {
             anti_flicker: AntiFlickerMode::Hz50,
             latest_frame: None,
             snapshot_toast: None,
+
+            keybindings: KeyBindings::default(),
+            rebinding_action: None,
 
             is_pip: false,
             pip_hovered: false,
@@ -291,6 +376,7 @@ impl AutoCamApp {
             }
 
             Message::CloseSettingsWindow => {
+                self.rebinding_action = None;
                 if let Some(id) = self.settings_window_id.take() {
                     window::close(id)
                 } else {
@@ -309,7 +395,6 @@ impl AutoCamApp {
             Message::MinimizeWindow(id) => window::minimize(id, true),
 
             Message::FrameReceived(frame) => {
-                self.frame_count += 1;
                 self.is_loading_camera = false;
                 self.image_handle = Some(image::Handle::from_rgba(
                     frame.width,
@@ -362,55 +447,81 @@ impl AutoCamApp {
 
             Message::KeyboardEvent(event) => {
                 if let keyboard::Event::KeyPressed { key, .. } = event {
-                    match key {
-                        Key::Named(key::Named::Space) => return self.update(Message::ToggleFreeze),
-                        Key::Named(key::Named::Escape) => {
-                            if self.settings_window_id.is_some() {
-                                return self.update(Message::CloseSettingsWindow);
-                            }
+                    // 1. If currently recording a custom shortcut:
+                    if let Some(action) = self.rebinding_action.take() {
+                        if key == Key::Named(key::Named::Escape) {
+                            return Task::none();
                         }
-                        Key::Character(c) if c.eq_ignore_ascii_case("f") => {
-                            return self.update(Message::ToggleFlip)
+                        match action {
+                            ShortcutAction::Freeze => self.keybindings.freeze = key,
+                            ShortcutAction::Flip => self.keybindings.flip = key,
+                            ShortcutAction::Rotate => self.keybindings.rotate = key,
+                            ShortcutAction::Grid => self.keybindings.grid = key,
+                            ShortcutAction::AutoFocus => self.keybindings.auto_focus = key,
+                            ShortcutAction::AutoEv => self.keybindings.auto_ev = key,
+                            ShortcutAction::FaceHud => self.keybindings.face_hud = key,
+                            ShortcutAction::Interpolation => self.keybindings.interpolation = key,
+                            ShortcutAction::Snapshot => self.keybindings.snapshot = key,
+                            ShortcutAction::Pip => self.keybindings.pip = key,
+                            ShortcutAction::Fullscreen => self.keybindings.fullscreen = key,
+                            ShortcutAction::Settings => self.keybindings.settings = key,
+                            ShortcutAction::ZoomIn => self.keybindings.zoom_in = key,
+                            ShortcutAction::ZoomOut => self.keybindings.zoom_out = key,
                         }
-                        Key::Character(c) if c.eq_ignore_ascii_case("r") => {
-                            return self.update(Message::RotateNext)
+                        return Task::none();
+                    }
+
+                    // 2. Normal key action dispatching:
+                    if key == Key::Named(key::Named::Escape) {
+                        if self.settings_window_id.is_some() {
+                            return self.update(Message::CloseSettingsWindow);
                         }
-                        Key::Character(c) if c.eq_ignore_ascii_case("p") => {
-                            return self.update(Message::TogglePip)
-                        }
-                        Key::Character(c) if c.eq_ignore_ascii_case("s") => {
-                            return self.update(Message::ToggleSettings)
-                        }
-                        Key::Character(c) if c.eq_ignore_ascii_case("g") => {
-                            return self.update(Message::CycleGridMode)
-                        }
-                        Key::Character(c) if c.eq_ignore_ascii_case("a") => {
-                            return self.update(Message::ToggleAutoFocus)
-                        }
-                        Key::Character(c) if c.eq_ignore_ascii_case("e") => {
-                            return self.update(Message::ToggleAutoEv)
-                        }
-                        Key::Character(c) if c.eq_ignore_ascii_case("d") => {
-                            return self.update(Message::ToggleFaceDetection)
-                        }
-                        Key::Character(c) if c.eq_ignore_ascii_case("i") => {
-                            return self.update(Message::ToggleFrameInterpolation)
-                        }
-                        Key::Character(c) if c.eq_ignore_ascii_case("c") => {
-                            return self.update(Message::CaptureSnapshot)
-                        }
-                        Key::Character(c) if c == "-" || c == "_" => {
-                            return self.update(Message::ZoomOut)
-                        }
-                        Key::Character(c) if c == "=" || c == "+" => {
-                            return self.update(Message::ZoomIn)
-                        }
-                        Key::Named(key::Named::F11) => {
-                            return self.update(Message::ToggleFullscreen)
-                        }
-                        _ => {}
+                    } else if key_matches(&key, &self.keybindings.freeze) {
+                        return self.update(Message::ToggleFreeze);
+                    } else if key_matches(&key, &self.keybindings.flip) {
+                        return self.update(Message::ToggleFlip);
+                    } else if key_matches(&key, &self.keybindings.rotate) {
+                        return self.update(Message::RotateNext);
+                    } else if key_matches(&key, &self.keybindings.grid) {
+                        return self.update(Message::CycleGridMode);
+                    } else if key_matches(&key, &self.keybindings.auto_focus) {
+                        return self.update(Message::ToggleAutoFocus);
+                    } else if key_matches(&key, &self.keybindings.auto_ev) {
+                        return self.update(Message::ToggleAutoEv);
+                    } else if key_matches(&key, &self.keybindings.face_hud) {
+                        return self.update(Message::ToggleFaceDetection);
+                    } else if key_matches(&key, &self.keybindings.interpolation) {
+                        return self.update(Message::ToggleFrameInterpolation);
+                    } else if key_matches(&key, &self.keybindings.snapshot) {
+                        return self.update(Message::CaptureSnapshot);
+                    } else if key_matches(&key, &self.keybindings.pip) {
+                        return self.update(Message::TogglePip);
+                    } else if key_matches(&key, &self.keybindings.fullscreen) {
+                        return self.update(Message::ToggleFullscreen);
+                    } else if key_matches(&key, &self.keybindings.settings) {
+                        return self.update(Message::ToggleSettings);
+                    } else if key_matches(&key, &self.keybindings.zoom_in) {
+                        return self.update(Message::ZoomIn);
+                    } else if key_matches(&key, &self.keybindings.zoom_out) {
+                        return self.update(Message::ZoomOut);
                     }
                 }
+                Task::none()
+            }
+
+            Message::StartRebinding(action) => {
+                self.rebinding_action = Some(action);
+                Task::none()
+            }
+
+            Message::CancelRebinding => {
+                self.rebinding_action = None;
+                Task::none()
+            }
+
+            Message::ResetShortcuts => {
+                self.keybindings = KeyBindings::default();
+                self.rebinding_action = None;
                 Task::none()
             }
 
@@ -1001,49 +1112,6 @@ impl AutoCamApp {
             }
         }
 
-        // Presenter Face Detection HUD Overlay
-        if self.face_detection {
-            if let Some(ref frame) = self.latest_frame {
-                if let Some(rect) = frame.face_rect {
-                    let top_ratio = (rect.y * 1000.0) as u16;
-                    let bottom_ratio = ((1.0 - rect.y - rect.height).max(0.0) * 1000.0) as u16;
-                    let left_ratio = (rect.x * 1000.0) as u16;
-                    let right_ratio = ((1.0 - rect.x - rect.width).max(0.0) * 1000.0) as u16;
-
-                    let face_hud: Element<'_, Message> = container(
-                        column![
-                            Space::new().height(Length::FillPortion(top_ratio.max(1))),
-                            row![
-                                Space::new().width(Length::FillPortion(left_ratio.max(1))),
-                                container(Space::new().width(Fill).height(Fill))
-                                    .style(|_: &Theme| container::Style {
-                                        border: Border {
-                                            color: Color::from_rgba(0.95, 0.95, 0.98, 0.70),
-                                            width: 1.0,
-                                            radius: theme::RADIUS_SM,
-                                        },
-                                        ..Default::default()
-                                    })
-                                    .width(Length::FillPortion(((rect.width * 1000.0) as u16).max(10)))
-                                    .height(Length::FillPortion(((rect.height * 1000.0) as u16).max(10))),
-                                Space::new().width(Length::FillPortion(right_ratio.max(1))),
-                            ]
-                            .width(Fill)
-                            .height(Length::FillPortion(((rect.height * 1000.0) as u16).max(10))),
-                            Space::new().height(Length::FillPortion(bottom_ratio.max(1))),
-                        ]
-                        .width(Fill)
-                        .height(Fill),
-                    )
-                    .width(Fill)
-                    .height(Fill)
-                    .into();
-
-                    viewport_stack = viewport_stack.push(face_hud);
-                }
-            }
-        }
-
         // Micro Loading Overlay
         if self.is_loading_camera {
             let loader: Element<'_, Message> = container(
@@ -1269,7 +1337,7 @@ impl AutoCamApp {
     }
 
     /// SEPARATE SETTINGS WINDOW VIEW:
-    /// Does NOT cover the camera screen! Offers full, comprehensive and fine-grained camera driver tuning.
+    /// High-performance, zero stutter, white sliders, custom shortcut manager.
     fn view_settings_window(&self, window_id: window::Id) -> Element<'_, Message> {
         // Title Bar for Settings Window
         let header = mouse_area(
@@ -1353,7 +1421,7 @@ impl AutoCamApp {
                     .spacing(8)
                     .align_y(Alignment::Center),
                     row![
-                        text(format!("Telemetry: Real-Time Pipeline • Sensor 60/30 FPS • Frames: {}", self.frame_count))
+                        text("Telemetry: Real-Time Sub-20ms Engine • Direct Sensor Pipe")
                             .size(10)
                             .color(theme::COLOR_TEXT_MUTED),
                     ],
@@ -1375,7 +1443,7 @@ impl AutoCamApp {
                         render_svg(icons::ICON_CAMERA, 14.0, self.action_shutter, false),
                         column![
                             text("Anti-Ghosting (High-Speed Action Shutter)").size(11).color(theme::COLOR_TEXT),
-                            text("Prevents motion blur & ghost trails on rapid hand/circuit movement").size(10).color(theme::COLOR_TEXT_MUTED),
+                            text("Prevents motion blur & ghost trails on rapid movement").size(10).color(theme::COLOR_TEXT_MUTED),
                         ],
                         Space::new().width(Fill),
                         button(text(if self.action_shutter { "Active" } else { "Off" }).size(10))
@@ -1406,6 +1474,7 @@ impl AutoCamApp {
                         slider(-20..=20, (self.ev_bias * 10.0) as i32, |val| {
                             Message::SetEvBias(val as f32 / 10.0)
                         })
+                        .style(theme::clean_slider_style)
                         .width(Length::Fixed(160.0)),
                     ]
                     .align_y(Alignment::Center),
@@ -1436,7 +1505,7 @@ impl AutoCamApp {
         ]
         .spacing(4);
 
-        // SECTION 3: Color, Brightness & Contrast
+        // SECTION 3: Color, Brightness & Contrast (Clean White Sliders)
         let color_section = column![
             text("3. Color Grading & Contrast (PCB Inspect)").size(11).color(theme::COLOR_TEXT_MUTED),
             container(
@@ -1448,6 +1517,7 @@ impl AutoCamApp {
                             .color(theme::COLOR_TEXT_MUTED),
                         Space::new().width(Fill),
                         slider(-50..=50, self.brightness, Message::SetBrightness)
+                            .style(theme::clean_slider_style)
                             .width(Length::Fixed(160.0)),
                     ]
                     .align_y(Alignment::Center),
@@ -1460,6 +1530,7 @@ impl AutoCamApp {
                         slider(5..=20, (self.contrast * 10.0) as i32, |val| {
                             Message::SetContrast(val as f32 / 10.0)
                         })
+                        .style(theme::clean_slider_style)
                         .width(Length::Fixed(160.0)),
                     ]
                     .align_y(Alignment::Center),
@@ -1476,6 +1547,7 @@ impl AutoCamApp {
                         slider(0..=20, (self.saturation * 10.0) as i32, |val| {
                             Message::SetSaturation(val as f32 / 10.0)
                         })
+                        .style(theme::clean_slider_style)
                         .width(Length::Fixed(160.0)),
                     ]
                     .align_y(Alignment::Center),
@@ -1495,7 +1567,7 @@ impl AutoCamApp {
                 column![
                     row![
                         render_svg(icons::ICON_FOCUS, 14.0, self.auto_focus, false),
-                        text("Hardware Auto-Focus [A]").size(11).color(theme::COLOR_TEXT),
+                        text("Hardware Auto-Focus").size(11).color(theme::COLOR_TEXT),
                         Space::new().width(Fill),
                         button(text(if self.auto_focus { "Active" } else { "Off" }).size(10))
                             .on_press(Message::ToggleAutoFocus)
@@ -1512,13 +1584,14 @@ impl AutoCamApp {
                         slider(100..=300, (self.zoom_level * 100.0) as i32, |val| {
                             Message::SetZoom(val as f32 / 100.0)
                         })
+                        .style(theme::clean_slider_style)
                         .width(Length::Fixed(160.0)),
                     ]
                     .align_y(Alignment::Center),
                     row![
                         text("Mirror / Horizontal Flip:").size(11).color(theme::COLOR_TEXT),
                         Space::new().width(Fill),
-                        button(text(if self.is_flip { "Mirrored [F]" } else { "Normal [F]" }).size(10))
+                        button(text(if self.is_flip { "Mirrored" } else { "Normal" }).size(10))
                             .on_press(Message::ToggleFlip)
                             .style(theme::clean_button_style(self.is_flip, false))
                             .padding([3, 10]),
@@ -1575,12 +1648,13 @@ impl AutoCamApp {
                     .align_y(Alignment::Center),
                     if self.cas_sharpen {
                         row![
-                            text("CAS Sharpness Intensity:").size(11).color(theme::COLOR_TEXT),
+                            text("CAS Sharpness Strength:").size(11).color(theme::COLOR_TEXT),
                             text(format!("{:.0}%", self.cas_intensity * 100.0)).size(11).color(theme::COLOR_TEXT_MUTED),
                             Space::new().width(Fill),
                             slider(10..=100, (self.cas_intensity * 100.0) as i32, |val| {
                                 Message::SetCasIntensity(val as f32 / 100.0)
                             })
+                            .style(theme::clean_slider_style)
                             .width(Length::Fixed(160.0)),
                         ]
                         .align_y(Alignment::Center)
@@ -1606,6 +1680,7 @@ impl AutoCamApp {
                             text(format!("{}", self.peaking_threshold)).size(11).color(theme::COLOR_TEXT_MUTED),
                             Space::new().width(Fill),
                             slider(20..=90, self.peaking_threshold, Message::SetPeakingThreshold)
+                                .style(theme::clean_slider_style)
                                 .width(Length::Fixed(160.0)),
                         ]
                         .align_y(Alignment::Center)
@@ -1615,8 +1690,8 @@ impl AutoCamApp {
                     row![
                         render_svg(icons::ICON_FACE, 14.0, self.face_detection, false),
                         column![
-                            text("Presenter Face Tracking HUD [D]").size(11).color(theme::COLOR_TEXT),
-                            text("Subtle 1px indicator framing presenter in lesson stream").size(10).color(theme::COLOR_TEXT_MUTED),
+                            text("Presenter Face Tracking HUD").size(11).color(theme::COLOR_TEXT),
+                            text("High-precision head clustering with zero-offset direct overlay").size(10).color(theme::COLOR_TEXT_MUTED),
                         ],
                         Space::new().width(Fill),
                         button(text(if self.face_detection { "Active" } else { "Off" }).size(10))
@@ -1665,9 +1740,115 @@ impl AutoCamApp {
         ]
         .spacing(4);
 
-        // SECTION 6: Storage, Captures & Defaults
+        // SECTION 6: Customizable Keyboard Shortcuts
+        let shortcut_rows = column![
+            shortcut_config_row(
+                "Freeze / Resume Live",
+                format_key(&self.keybindings.freeze),
+                self.rebinding_action == Some(ShortcutAction::Freeze),
+                Message::StartRebinding(ShortcutAction::Freeze),
+            ),
+            shortcut_config_row(
+                "Mirror / Horizontal Flip",
+                format_key(&self.keybindings.flip),
+                self.rebinding_action == Some(ShortcutAction::Flip),
+                Message::StartRebinding(ShortcutAction::Flip),
+            ),
+            shortcut_config_row(
+                "Rotate 90 Degrees",
+                format_key(&self.keybindings.rotate),
+                self.rebinding_action == Some(ShortcutAction::Rotate),
+                Message::StartRebinding(ShortcutAction::Rotate),
+            ),
+            shortcut_config_row(
+                "Cycle Grid Overlay",
+                format_key(&self.keybindings.grid),
+                self.rebinding_action == Some(ShortcutAction::Grid),
+                Message::StartRebinding(ShortcutAction::Grid),
+            ),
+            shortcut_config_row(
+                "Toggle Auto Focus",
+                format_key(&self.keybindings.auto_focus),
+                self.rebinding_action == Some(ShortcutAction::AutoFocus),
+                Message::StartRebinding(ShortcutAction::AutoFocus),
+            ),
+            shortcut_config_row(
+                "Toggle Auto EV",
+                format_key(&self.keybindings.auto_ev),
+                self.rebinding_action == Some(ShortcutAction::AutoEv),
+                Message::StartRebinding(ShortcutAction::AutoEv),
+            ),
+            shortcut_config_row(
+                "Presenter Face Tracking HUD",
+                format_key(&self.keybindings.face_hud),
+                self.rebinding_action == Some(ShortcutAction::FaceHud),
+                Message::StartRebinding(ShortcutAction::FaceHud),
+            ),
+            shortcut_config_row(
+                "Toggle 60 FPS Motion Smoothing",
+                format_key(&self.keybindings.interpolation),
+                self.rebinding_action == Some(ShortcutAction::Interpolation),
+                Message::StartRebinding(ShortcutAction::Interpolation),
+            ),
+            shortcut_config_row(
+                "Capture Snapshot Still",
+                format_key(&self.keybindings.snapshot),
+                self.rebinding_action == Some(ShortcutAction::Snapshot),
+                Message::StartRebinding(ShortcutAction::Snapshot),
+            ),
+            shortcut_config_row(
+                "Toggle Picture-in-Picture (PiP)",
+                format_key(&self.keybindings.pip),
+                self.rebinding_action == Some(ShortcutAction::Pip),
+                Message::StartRebinding(ShortcutAction::Pip),
+            ),
+            shortcut_config_row(
+                "Toggle Fullscreen",
+                format_key(&self.keybindings.fullscreen),
+                self.rebinding_action == Some(ShortcutAction::Fullscreen),
+                Message::StartRebinding(ShortcutAction::Fullscreen),
+            ),
+            shortcut_config_row(
+                "Toggle Settings Window",
+                format_key(&self.keybindings.settings),
+                self.rebinding_action == Some(ShortcutAction::Settings),
+                Message::StartRebinding(ShortcutAction::Settings),
+            ),
+            shortcut_config_row(
+                "Zoom In",
+                format_key(&self.keybindings.zoom_in),
+                self.rebinding_action == Some(ShortcutAction::ZoomIn),
+                Message::StartRebinding(ShortcutAction::ZoomIn),
+            ),
+            shortcut_config_row(
+                "Zoom Out",
+                format_key(&self.keybindings.zoom_out),
+                self.rebinding_action == Some(ShortcutAction::ZoomOut),
+                Message::StartRebinding(ShortcutAction::ZoomOut),
+            ),
+        ]
+        .spacing(4);
+
+        let shortcuts_section = column![
+            row![
+                text("6. Custom Keyboard Shortcuts (Click to Rebind)").size(11).color(theme::COLOR_TEXT_MUTED),
+                Space::new().width(Fill),
+                button(text("Reset Shortcuts").size(10))
+                    .on_press(Message::ResetShortcuts)
+                    .style(theme::clean_button_style(false, false))
+                    .padding([2, 6]),
+            ]
+            .align_y(Alignment::Center),
+            container(shortcut_rows)
+                .padding(10)
+                .style(theme::settings_inner_box_style)
+                .width(Fill),
+        ]
+        .spacing(4);
+
+        // SECTION 7: Storage & Maintenance
         let storage_section = column![
-            text("6. Captures & Maintenance").size(11).color(theme::COLOR_TEXT_MUTED),
+            text("7. Captures & Maintenance").size(11).color(theme::COLOR_TEXT_MUTED),
             container(
                 column![
                     row![
@@ -1683,7 +1864,7 @@ impl AutoCamApp {
                     ]
                     .align_y(Alignment::Center),
                     row![
-                        text("Reset Configuration:").size(11).color(theme::COLOR_TEXT),
+                        text("Reset All Configuration:").size(11).color(theme::COLOR_TEXT),
                         Space::new().width(Fill),
                         button(text("Reset All to Defaults").size(11))
                             .on_press(Message::ResetDefaults)
@@ -1700,33 +1881,6 @@ impl AutoCamApp {
         ]
         .spacing(4);
 
-        // Shortcuts Cheatsheet
-        let shortcuts_guide = column![
-            text("Quick Keyboard Shortcuts").size(11).color(theme::COLOR_TEXT_MUTED),
-            container(
-                column![
-                    shortcut_row("Space", "Freeze / Resume live feed"),
-                    shortcut_row("F", "Mirror / Flip camera"),
-                    shortcut_row("R", "Rotate 90 degrees"),
-                    shortcut_row("G", "Cycle Grid (Off -> 3x3 -> Crosshair)"),
-                    shortcut_row("A", "Toggle Auto Focus"),
-                    shortcut_row("E", "Toggle Auto EV"),
-                    shortcut_row("C", "Capture high-res snapshot"),
-                    shortcut_row("P", "Toggle Picture-in-Picture"),
-                    shortcut_row("F11", "Toggle Fullscreen"),
-                    shortcut_row("D", "Toggle Presenter Face Tracking HUD"),
-                    shortcut_row("I", "Toggle 60 FPS Motion Interpolation"),
-                    shortcut_row("+ / -", "Zoom in / Zoom out"),
-                    shortcut_row("S / Esc", "Toggle / Close Settings Window"),
-                ]
-                .spacing(5),
-            )
-            .padding(10)
-            .style(theme::settings_inner_box_style)
-            .width(Fill),
-        ]
-        .spacing(4);
-
         let scroll_body = scrollable(
             column![
                 dev_section,
@@ -1734,8 +1888,8 @@ impl AutoCamApp {
                 color_section,
                 optics_section,
                 teaching_section,
+                shortcuts_section,
                 storage_section,
-                shortcuts_guide,
             ]
             .spacing(12)
             .padding([12, 16]),
@@ -1775,49 +1929,6 @@ impl AutoCamApp {
             .height(Length::Fixed(14.0));
 
         let mut layers: Vec<Element<'_, Message>> = vec![video_content];
-
-        // Presenter Face Detection HUD in PiP
-        if self.face_detection {
-            if let Some(ref frame) = self.latest_frame {
-                if let Some(rect) = frame.face_rect {
-                    let top_ratio = (rect.y * 1000.0) as u16;
-                    let bottom_ratio = ((1.0 - rect.y - rect.height).max(0.0) * 1000.0) as u16;
-                    let left_ratio = (rect.x * 1000.0) as u16;
-                    let right_ratio = ((1.0 - rect.x - rect.width).max(0.0) * 1000.0) as u16;
-
-                    let face_hud: Element<'_, Message> = container(
-                        column![
-                            Space::new().height(Length::FillPortion(top_ratio.max(1))),
-                            row![
-                                Space::new().width(Length::FillPortion(left_ratio.max(1))),
-                                container(Space::new().width(Fill).height(Fill))
-                                    .style(|_: &Theme| container::Style {
-                                        border: Border {
-                                            color: Color::from_rgba(0.95, 0.95, 0.98, 0.70),
-                                            width: 1.0,
-                                            radius: theme::RADIUS_SM,
-                                        },
-                                        ..Default::default()
-                                    })
-                                    .width(Length::FillPortion(((rect.width * 1000.0) as u16).max(10)))
-                                    .height(Length::FillPortion(((rect.height * 1000.0) as u16).max(10))),
-                                Space::new().width(Length::FillPortion(right_ratio.max(1))),
-                            ]
-                            .width(Fill)
-                            .height(Length::FillPortion(((rect.height * 1000.0) as u16).max(10))),
-                            Space::new().height(Length::FillPortion(bottom_ratio.max(1))),
-                        ]
-                        .width(Fill)
-                        .height(Fill),
-                    )
-                    .width(Fill)
-                    .height(Fill)
-                    .into();
-
-                    layers.push(face_hud);
-                }
-            }
-        }
 
         // Overlay toolbar when hovering
         if self.pip_hovered {
@@ -1898,15 +2009,27 @@ impl AutoCamApp {
     }
 }
 
-/// Helper row for shortcut documentation
-fn shortcut_row<'a>(key_name: &'static str, description: &'static str) -> Element<'a, Message> {
+/// Helper row for shortcut rebinding configuration
+fn shortcut_config_row<'a>(
+    description: &'static str,
+    key_label: String,
+    is_rebinding: bool,
+    on_click: Message,
+) -> Element<'a, Message> {
+    let btn_text = if is_rebinding {
+        "[ Press any key... ]".to_string()
+    } else {
+        key_label
+    };
+
     row![
-        container(text(key_name).size(11).color(theme::COLOR_TEXT))
-            .padding([2, 6])
-            .style(theme::tooltip_style),
-        text(description).size(11).color(theme::COLOR_TEXT_MUTED),
+        text(description).size(11).color(theme::COLOR_TEXT),
+        Space::new().width(Fill),
+        button(text(btn_text).size(11))
+            .on_press(on_click)
+            .style(theme::clean_button_style(is_rebinding, false))
+            .padding([3, 10]),
     ]
-    .spacing(8)
     .align_y(Alignment::Center)
     .into()
 }

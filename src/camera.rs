@@ -464,7 +464,11 @@ fn run_realtime_camera_pipeline(
 
                     // 4. Presenter Face Detection HUD tracking
                     let face_rect = if cfg.enable_face_detect {
-                        face_tracker.update(&final_pixels, final_w, final_h)
+                        let rect = face_tracker.update(&final_pixels, final_w, final_h);
+                        if let Some(r) = rect {
+                            crate::face_detect::draw_face_hud(&mut final_pixels, final_w, final_h, r);
+                        }
+                        rect
                     } else {
                         None
                     };
