@@ -161,12 +161,12 @@ impl AutoCamApp {
                 action_shutter: true,
                 auto_focus: true,
                 manual_focus: 50,
-                auto_ev: true,
+                auto_ev: false,
                 ev_bias: 0.0,
                 brightness: 0,
                 contrast: 1.0,
                 focus_peaking: false,
-                anti_flicker: AntiFlickerMode::Off,
+                anti_flicker: AntiFlickerMode::Hz50,
                 latest_frame: None,
                 snapshot_toast: None,
             },
@@ -175,11 +175,18 @@ impl AutoCamApp {
     }
 
     pub fn subscription(&self) -> Subscription<Message> {
-        Subscription::batch(vec![
+        let mut subs = vec![
             iced::time::every(Duration::from_millis(8)).map(|_| Message::Tick),
-            iced::time::every(Duration::from_millis(1500)).map(|_| Message::PollDevices),
             keyboard::listen().map(Message::KeyboardEvent),
-        ])
+        ];
+
+        // Only query USB devices periodically when no camera is streaming,
+        // avoiding periodic DirectShow/COM bus hitches and stream flickers
+        if self.camera_manager.is_none() {
+            subs.push(iced::time::every(Duration::from_millis(1500)).map(|_| Message::PollDevices));
+        }
+
+        Subscription::batch(subs)
     }
 
     pub fn theme(&self) -> iced::Theme {
@@ -1424,7 +1431,7 @@ fn main() -> iced::Result {
         .window(window::Settings {
             icon,
             decorations: false,
-            transparent: true,
+            transparent: false,
             size: iced::Size::new(960.0, 600.0),
             resizable: true,
             ..Default::default()

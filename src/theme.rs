@@ -140,14 +140,16 @@ pub fn settings_inner_box_style(_theme: &Theme) -> container::Style {
 }
 
 pub fn pick_list_style(_theme: &Theme, status: pick_list::Status) -> pick_list::Style {
-    let (bg, border_color) = match status {
+    let (bg, border_color, border_width) = match status {
         pick_list::Status::Hovered | pick_list::Status::Opened { .. } => (
             Background::Color(COLOR_SURFACE_MUTED),
             COLOR_BORDER_ACTIVE,
+            1.0,
         ),
         _ => (
             Background::Color(COLOR_SURFACE),
-            COLOR_BORDER,
+            Color::TRANSPARENT,
+            0.0,
         ),
     };
 
@@ -158,7 +160,7 @@ pub fn pick_list_style(_theme: &Theme, status: pick_list::Status) -> pick_list::
         background: bg,
         border: Border {
             color: border_color,
-            width: 1.0,
+            width: border_width,
             radius: RADIUS_SM,
         },
     }
@@ -169,16 +171,14 @@ pub fn clean_button_style(
     is_danger: bool,
 ) -> impl Fn(&Theme, button::Status) -> button::Style {
     move |_theme, status| {
-        let (bg, border_color, text_color) = if is_danger {
+        let (bg, text_color) = if is_danger {
             match status {
                 button::Status::Hovered => (
-                    COLOR_DANGER,
                     COLOR_DANGER,
                     COLOR_TEXT,
                 ),
                 _ => (
                     Color::TRANSPARENT,
-                    COLOR_BORDER,
                     COLOR_TEXT_MUTED,
                 ),
             }
@@ -186,12 +186,10 @@ pub fn clean_button_style(
             match status {
                 button::Status::Hovered => (
                     COLOR_ACTIVE_BG,
-                    COLOR_BORDER_ACTIVE,
                     COLOR_TEXT,
                 ),
                 _ => (
                     COLOR_SURFACE_MUTED,
-                    COLOR_BORDER_ACTIVE,
                     COLOR_TEXT,
                 ),
             }
@@ -199,12 +197,10 @@ pub fn clean_button_style(
             match status {
                 button::Status::Hovered => (
                     COLOR_SURFACE_MUTED,
-                    COLOR_BORDER_ACTIVE,
                     COLOR_TEXT,
                 ),
                 _ => (
                     Color::TRANSPARENT,
-                    COLOR_BORDER,
                     COLOR_TEXT_MUTED,
                 ),
             }
@@ -214,8 +210,8 @@ pub fn clean_button_style(
             background: Some(Background::Color(bg)),
             text_color,
             border: Border {
-                color: border_color,
-                width: 1.0,
+                color: Color::TRANSPARENT,
+                width: 0.0,
                 radius: RADIUS_SM,
             },
             shadow: Shadow::default(),

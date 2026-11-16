@@ -212,13 +212,13 @@ fn run_capture_loop(
     let mut is_frozen = false;
 
     // Advanced Camera Engine Settings
-    let mut auto_ev = true;
+    let mut auto_ev = false; // Passive by default so it doesn't fight webcam hardware exposure
     let mut action_shutter = true; // Fast shutter anti-ghosting enabled by default!
     let mut ev_bias = 0.0f32;
     let mut brightness = 0i32;
     let mut contrast = 1.0f32;
     let mut focus_peaking = false;
-    let mut _anti_flicker = AntiFlickerMode::Off;
+    let mut _anti_flicker = AntiFlickerMode::Hz50; // 50Hz for Thailand / EU grid anti-flicker
 
     // Running EMA of scene luminance for smooth software Auto-EV
     let mut smooth_ev_gain = 1.0f32;
@@ -291,11 +291,12 @@ fn run_capture_loop(
                         .decode_image_to_buffer::<RgbAFormat>(&mut decode_buf)
                         .is_ok()
                     {
-                        // 1. Calculate Software Auto EV gain
+                        // 1. Calculate Software Auto EV gain with strict deadband to prevent
+                        // oscillating against webcam hardware auto-exposure (zero brightness flickering)
                         let target_gain = if auto_ev {
                             let mut sample_sum = 0u64;
                             let mut sample_count = 0u64;
-                            let step = 32; // Downsampled 32x for microsecond evaluation
+                            let step = 32;
                             for i in (0..decode_buf.len()).step_by(step * 4) {
                                 let r = decode_buf[i] as u32;
                                 let g = decode_buf[i + 1] as u32;
@@ -305,15 +306,27 @@ fn run_capture_loop(
                                 sample_count += 1;
                             }
                             let mean_y = (sample_sum as f32 / sample_count.max(1) as f32).max(10.0);
-                            let ideal_y = 125.0f32;
-                            (ideal_y / mean_y).clamp(0.5, 2.5)
+                            
+                            // Wide deadband (105..145): when within normal lighting, do NOT alter gain.
+                            // This completely prevents digital gain from hunting against webcam hardware ISP.
+                            if mean_y >= 105.0 && mean_y <= 145.0 {
+                                1.0f32
+                            } else if mean_y < 105.0 {
+                                (120.0 / mean_y).clamp(1.0, 2.0)
+                            } else {
+                                (130.0 / mean_y).clamp(0.65, 1.0)
+                            }
                         } else {
                             1.0f32
                         };
 
-                        // In Action Shutter mode, react instantly with faster alpha to avoid trailing exposure ghosting
-                        let alpha = if action_shutter { 0.35f32 } else { 0.12f32 };
-                        smooth_ev_gain = smooth_ev_gain * (1.0 - alpha) + target_gain * alpha;
+                        // Gentle smoothing with deadband threshold to eliminate rapid micro-flickering
+                        let smooth_factor = if action_shutter { 0.88f32 } else { 0.94f32 };
+                        if (target_gain - smooth_ev_gain).abs() > 0.05 {
+                            smooth_ev_gain = smooth_ev_gain * smooth_factor + target_gain * (1.0 - smooth_factor);
+                        } else {
+                            smooth_ev_gain = target_gain;
+                        }
                         let ev_multiplier = smooth_ev_gain * 2.0f32.powf(ev_bias);
 
                         // 2. Apply transforms: Zoom -> Flip -> Rotate -> EV/Contrast LUT -> Peaking
