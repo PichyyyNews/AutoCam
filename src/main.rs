@@ -3,6 +3,7 @@ mod theme;
 
 use camera::{CameraControl, CameraDeviceInfo, CameraManager, VideoResolution};
 use iced::keyboard::{self, key, Key};
+use iced::mouse;
 use iced::widget::{
     button, column, container, image, mouse_area, pick_list, row, stack, text, Space,
 };
@@ -33,6 +34,8 @@ pub struct AutoCamApp {
 #[derive(Debug, Clone)]
 pub enum Message {
     Tick,
+    PollDevices,
+    DevicesPolled(Vec<CameraDeviceInfo>),
     KeyboardEvent(keyboard::Event),
     DeviceSelected(CameraDeviceInfo),
     ToggleResolution,
@@ -46,6 +49,7 @@ pub enum Message {
     PipMouseEnter,
     PipMouseExit,
     DragWindow,
+    ResizeWindow(window::Direction),
     MinimizeWindow,
     CloseWindow,
     RefreshDevices,
@@ -59,7 +63,6 @@ impl AutoCamApp {
 
         let camera_manager = if let Some(ref dev) = selected_device {
             let (mgr, _) = CameraManager::start(dev.index, resolution);
-            // Flip is enabled by default to mirror the camera view naturally
             mgr.send(CameraControl::SetFlip(true));
             Some(mgr)
         } else {
@@ -69,7 +72,7 @@ impl AutoCamApp {
         let status_text = if selected_device.is_some() {
             "Camera stream active".to_string()
         } else {
-            "No camera detected".to_string()
+            "No camera detected - connect camera to start".to_string()
         };
 
         (
@@ -80,7 +83,7 @@ impl AutoCamApp {
                 resolution,
                 is_pip: false,
                 pip_hovered: false,
-                is_flip: true, // Enabled by default to eliminate camera orientation confusion
+                is_flip: true, // Enabled by default to eliminate orientation confusion
                 is_frozen: false,
                 is_fullscreen: false,
                 rotation_deg: 0,
@@ -97,6 +100,7 @@ impl AutoCamApp {
     pub fn subscription(&self) -> Subscription<Message> {
         Subscription::batch(vec![
             iced::time::every(Duration::from_millis(16)).map(|_| Message::Tick),
+            iced::time::every(Duration::from_millis(1500)).map(|_| Message::PollDevices),
             keyboard::listen().map(Message::KeyboardEvent),
         ])
     }
@@ -112,6 +116,44 @@ impl AutoCamApp {
                             frame.height,
                             frame.rgba,
                         ));
+                    }
+                }
+                Task::none()
+            }
+
+            Message::PollDevices => Task::perform(
+                async { CameraManager::query_available_devices() },
+                Message::DevicesPolled,
+            ),
+
+            Message::DevicesPolled(new_devices) => {
+                if new_devices != self.available_devices {
+                    let was_empty =
+                        self.selected_device.is_none() || self.available_devices.is_empty();
+                    self.available_devices = new_devices.clone();
+
+                    if was_empty {
+                        // Device hot-plugged while no camera was active! Auto-connect without restart
+                        if let Some(first_dev) = self.available_devices.first().cloned() {
+                            self.status_text = format!("Camera connected: {}", first_dev.name);
+                            return self.update(Message::DeviceSelected(first_dev));
+                        }
+                    } else if let Some(ref current) = self.selected_device {
+                        let still_exists =
+                            self.available_devices.iter().any(|d| d.name == current.name);
+                        if !still_exists {
+                            // Currently selected camera was unplugged!
+                            if let Some(next_dev) = self.available_devices.first().cloned() {
+                                self.status_text = format!("Switched to {}", next_dev.name);
+                                return self.update(Message::DeviceSelected(next_dev));
+                            } else {
+                                self.selected_device = None;
+                                self.camera_manager = None;
+                                self.image_handle = None;
+                                self.status_text =
+                                    "Camera disconnected - waiting for device...".to_string();
+                            }
+                        }
                     }
                 }
                 Task::none()
@@ -151,7 +193,7 @@ impl AutoCamApp {
                     mgr.send(CameraControl::SetFlip(self.is_flip));
                     self.camera_manager = Some(mgr);
                 }
-                self.status_text = format!("Switched to {}", device.name);
+                self.status_text = format!("Connected: {}", device.name);
                 Task::none()
             }
 
@@ -269,6 +311,9 @@ impl AutoCamApp {
             }
 
             Message::DragWindow => window::latest().and_then(window::drag),
+            Message::ResizeWindow(direction) => {
+                window::latest().and_then(move |id| window::drag_resize(id, direction))
+            }
             Message::MinimizeWindow => window::latest().and_then(|id| window::minimize(id, true)),
             Message::CloseWindow => window::latest().and_then(window::close),
 
@@ -284,10 +329,16 @@ impl AutoCamApp {
     }
 
     pub fn view(&self) -> Element<'_, Message> {
-        if self.is_pip {
+        let content = if self.is_pip {
             self.view_pip()
         } else {
             self.view_normal()
+        };
+
+        if self.is_fullscreen {
+            content
+        } else {
+            with_resize_handles(content)
         }
     }
 
@@ -351,7 +402,8 @@ impl AutoCamApp {
             .style(theme::title_bar_style)
             .width(Fill),
         )
-        .on_press(Message::DragWindow);
+        .on_press(Message::DragWindow)
+        .on_double_click(Message::ToggleFullscreen);
 
         // 2. Video Viewport
         let video_content: Element<'_, Message> = if let Some(ref handle) = self.image_handle {
@@ -364,7 +416,7 @@ impl AutoCamApp {
             container(
                 column![
                     text("Waiting for camera feed...").size(14),
-                    text("Ensure camera is connected and not used by another app")
+                    text("Plug in or select camera to start streaming")
                         .size(12)
                         .color(theme::COLOR_TEXT_MUTED),
                 ]
@@ -424,6 +476,8 @@ impl AutoCamApp {
                 text(&self.status_text)
                     .size(11)
                     .color(theme::COLOR_TEXT_MUTED),
+                // Corner resize affordance indicator
+                text("◿").size(10).color(theme::COLOR_BORDER_ACTIVE),
             ]
             .spacing(10)
             .align_y(Alignment::Center)
@@ -514,6 +568,88 @@ impl AutoCamApp {
         .on_exit(Message::PipMouseExit)
         .into()
     }
+}
+
+/// Wraps window content with non-blocking edge/corner resize zones for borderless window dragging
+fn with_resize_handles<'a>(content: Element<'a, Message>) -> Element<'a, Message> {
+    let edge_thickness = 6.0;
+    let corner_size = 20.0;
+
+    // Top edge (slim to keep titlebar drag smooth)
+    let top = mouse_area(Space::new().width(Fill).height(Length::Fixed(4.0)))
+        .interaction(mouse::Interaction::ResizingVertically)
+        .on_press(Message::ResizeWindow(window::Direction::North));
+
+    // Bottom edge
+    let bottom = container(
+        mouse_area(Space::new().width(Fill).height(Length::Fixed(edge_thickness)))
+            .interaction(mouse::Interaction::ResizingVertically)
+            .on_press(Message::ResizeWindow(window::Direction::South)),
+    )
+    .align_bottom(Fill)
+    .width(Fill);
+
+    // Left edge
+    let left = mouse_area(Space::new().width(Length::Fixed(edge_thickness)).height(Fill))
+        .interaction(mouse::Interaction::ResizingHorizontally)
+        .on_press(Message::ResizeWindow(window::Direction::West));
+
+    // Right edge
+    let right = container(
+        mouse_area(Space::new().width(Length::Fixed(edge_thickness)).height(Fill))
+            .interaction(mouse::Interaction::ResizingHorizontally)
+            .on_press(Message::ResizeWindow(window::Direction::East)),
+    )
+    .align_right(Fill)
+    .height(Fill);
+
+    // Top-Left corner
+    let top_left = mouse_area(
+        Space::new()
+            .width(Length::Fixed(12.0))
+            .height(Length::Fixed(12.0)),
+    )
+    .interaction(mouse::Interaction::ResizingDiagonallyDown)
+    .on_press(Message::ResizeWindow(window::Direction::NorthWest));
+
+    // Bottom-Left corner
+    let bottom_left = container(
+        mouse_area(
+            Space::new()
+                .width(Length::Fixed(16.0))
+                .height(Length::Fixed(16.0)),
+        )
+        .interaction(mouse::Interaction::ResizingDiagonallyUp)
+        .on_press(Message::ResizeWindow(window::Direction::SouthWest)),
+    )
+    .align_bottom(Fill);
+
+    // Bottom-Right corner (Primary resize handle - generous hit area)
+    let bottom_right = container(
+        mouse_area(
+            Space::new()
+                .width(Length::Fixed(corner_size))
+                .height(Length::Fixed(corner_size)),
+        )
+        .interaction(mouse::Interaction::ResizingDiagonallyDown)
+        .on_press(Message::ResizeWindow(window::Direction::SouthEast)),
+    )
+    .align_right(Fill)
+    .align_bottom(Fill);
+
+    stack![
+        content,
+        top,
+        bottom,
+        left,
+        right,
+        top_left,
+        bottom_left,
+        bottom_right,
+    ]
+    .width(Fill)
+    .height(Fill)
+    .into()
 }
 
 fn main() -> iced::Result {

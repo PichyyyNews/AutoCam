@@ -177,21 +177,22 @@ fn run_capture_loop(
     // Pre-allocated scratch buffer for image transforms to achieve minimal RAM footprint
     let mut decode_buf: Vec<u8> = Vec::new();
     let mut scratch_buf: Vec<u8> = Vec::new();
+    let mut consecutive_errors = 0u32;
 
     while is_running.load(Ordering::Relaxed) {
         // Drain pending commands
         while let Ok(cmd) = cmd_rx.try_recv() {
             match cmd {
                 CameraControl::SwitchDevice(new_dev) => {
-                    if new_dev != current_device {
-                        current_device = new_dev;
-                        camera = open_camera(current_device, current_res);
-                    }
+                    current_device = new_dev;
+                    camera = open_camera(current_device, current_res);
+                    consecutive_errors = 0;
                 }
                 CameraControl::SwitchResolution(new_res) => {
                     if new_res != current_res {
                         current_res = new_res;
                         camera = open_camera(current_device, current_res);
+                        consecutive_errors = 0;
                     }
                 }
                 CameraControl::SetFlip(flip) => is_flip = flip,
@@ -211,6 +212,7 @@ fn run_capture_loop(
         if let Some(ref mut cam) = camera {
             match cam.frame() {
                 Ok(raw_buffer) => {
+                    consecutive_errors = 0;
                     let res = raw_buffer.resolution();
                     let (width, height) = (res.width(), res.height());
                     let required_len = (width * height * 4) as usize;
@@ -245,12 +247,17 @@ fn run_capture_loop(
                     }
                 }
                 Err(_) => {
-                    // Slight delay only on frame grab error
-                    thread::sleep(Duration::from_millis(8));
+                    consecutive_errors += 1;
+                    // Auto-reconnect if device was unplugged or stream interrupted
+                    if consecutive_errors > 25 {
+                        camera = None;
+                        consecutive_errors = 0;
+                    }
+                    thread::sleep(Duration::from_millis(16));
                 }
             }
         } else {
-            // No camera open, wait and retry occasionally
+            // No camera open, wait and retry reconnecting automatically
             thread::sleep(Duration::from_millis(500));
             camera = open_camera(current_device, current_res);
         }
