@@ -7,8 +7,10 @@ mod theme;
 use camera::{
     AntiFlickerMode, CameraControl, CameraDeviceInfo, CameraManager, FramePayload, VideoResolution,
 };
+use iced::futures::sink::SinkExt;
 use iced::keyboard::{self, key, Key};
 use iced::mouse;
+use iced::stream;
 use iced::widget::{
     button, column, container, image, mouse_area, pick_list, row, slider, stack, svg, text, tooltip,
     Space,
@@ -80,7 +82,8 @@ pub struct AutoCamApp {
 
 #[derive(Debug, Clone)]
 pub enum Message {
-    Tick,
+    FrameReceived(FramePayload),
+    ClearSnapshotToast,
     PollDevices,
     DevicesPolled(Vec<CameraDeviceInfo>),
     KeyboardEvent(keyboard::Event),
@@ -117,6 +120,24 @@ pub enum Message {
     CaptureSnapshot,
 }
 
+fn camera_frame_stream() -> impl iced::futures::Stream<Item = Message> {
+    stream::channel(1, |mut output: iced::futures::channel::mpsc::Sender<Message>| async move {
+        loop {
+            if let Some(mut rx) = camera::get_global_frame_rx() {
+                while rx.changed().await.is_ok() {
+                    let frame = rx.borrow_and_update().clone();
+                    if let Some(f) = frame {
+                        if output.send(Message::FrameReceived(f)).await.is_err() {
+                            return;
+                        }
+                    }
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(150)).await;
+        }
+    })
+}
+
 impl AutoCamApp {
     pub fn new() -> (Self, Task<Message>) {
         let devices = CameraManager::query_available_devices();
@@ -124,7 +145,7 @@ impl AutoCamApp {
         let resolution = VideoResolution::Hd720p;
 
         let camera_manager = if let Some(ref dev) = selected_device {
-            let (mgr, _) = CameraManager::start(dev.index, resolution);
+            let mgr = CameraManager::start(dev.index, resolution);
             mgr.send(CameraControl::SetFlip(true));
             Some(mgr)
         } else {
@@ -176,7 +197,7 @@ impl AutoCamApp {
 
     pub fn subscription(&self) -> Subscription<Message> {
         let mut subs = vec![
-            iced::time::every(Duration::from_millis(8)).map(|_| Message::Tick),
+            Subscription::run(camera_frame_stream),
             keyboard::listen().map(Message::KeyboardEvent),
         ];
 
@@ -195,25 +216,20 @@ impl AutoCamApp {
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
         match message {
-            Message::Tick => {
-                if let Some(ref mgr) = self.camera_manager {
-                    if let Some(frame) = mgr.take_latest_frame() {
-                        self.frame_count += 1;
-                        self.is_loading_camera = false; // Transition smoothly from loader to live
-                        self.image_handle = Some(image::Handle::from_rgba(
-                            frame.width,
-                            frame.height,
-                            frame.rgba.clone(),
-                        ));
-                        self.latest_frame = Some(frame);
-                    }
-                }
-                // Check if snapshot toast expired (after 3 seconds)
-                if let Some((_, created_at)) = self.snapshot_toast {
-                    if created_at.elapsed() > Duration::from_secs(3) {
-                        self.snapshot_toast = None;
-                    }
-                }
+            Message::FrameReceived(frame) => {
+                self.frame_count += 1;
+                self.is_loading_camera = false; // Transition smoothly from loader to live
+                self.image_handle = Some(image::Handle::from_rgba(
+                    frame.width,
+                    frame.height,
+                    frame.rgba.clone(),
+                ));
+                self.latest_frame = Some(frame);
+                Task::none()
+            }
+
+            Message::ClearSnapshotToast => {
+                self.snapshot_toast = None;
                 Task::none()
             }
 
@@ -296,6 +312,11 @@ impl AutoCamApp {
             }
 
             Message::DeviceSelected(dev) => {
+                if let Some(ref current) = self.selected_device {
+                    if current.index == dev.index && self.camera_manager.is_some() {
+                        return Task::none();
+                    }
+                }
                 self.selected_device = Some(dev.clone());
                 self.status_text = format!("Connected: {}", dev.name);
                 self.is_loading_camera = true; // Show smooth freeze-to-live spinner
@@ -303,7 +324,7 @@ impl AutoCamApp {
                 if let Some(ref mgr) = self.camera_manager {
                     mgr.send(CameraControl::SwitchDevice(dev.index));
                 } else {
-                    let (mgr, _) = CameraManager::start(dev.index, self.resolution);
+                    let mgr = CameraManager::start(dev.index, self.resolution);
                     mgr.send(CameraControl::SetFlip(self.is_flip));
                     mgr.send(CameraControl::SetRotate(self.rotation_deg));
                     mgr.send(CameraControl::SetZoom(self.zoom_level));
@@ -476,6 +497,10 @@ impl AutoCamApp {
                     .is_ok()
                     {
                         self.snapshot_toast = Some((filename, Instant::now()));
+                        return Task::perform(
+                            tokio::time::sleep(Duration::from_secs(3)),
+                            |_| Message::ClearSnapshotToast,
+                        );
                     }
                 }
                 Task::none()

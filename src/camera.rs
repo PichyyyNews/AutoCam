@@ -5,9 +5,16 @@ use nokhwa::utils::{
 };
 use nokhwa::Camera;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{mpsc, Arc, RwLock};
 use std::thread;
 use std::time::Duration;
+
+static GLOBAL_FRAME_RX: RwLock<Option<tokio::sync::watch::Receiver<Option<FramePayload>>>> =
+    RwLock::new(None);
+
+pub fn get_global_frame_rx() -> Option<tokio::sync::watch::Receiver<Option<FramePayload>>> {
+    GLOBAL_FRAME_RX.read().ok()?.clone()
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CameraDeviceInfo {
@@ -60,7 +67,7 @@ impl AntiFlickerMode {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct FramePayload {
     pub width: u32,
     pub height: u32,
@@ -89,7 +96,6 @@ pub enum CameraControl {
 
 pub struct CameraManager {
     command_tx: mpsc::Sender<CameraControl>,
-    frame_slot: Arc<Mutex<Option<FramePayload>>>,
     is_running: Arc<AtomicBool>,
 }
 
@@ -115,10 +121,12 @@ impl CameraManager {
     pub fn start(
         initial_device: u32,
         initial_res: VideoResolution,
-    ) -> (Self, Arc<Mutex<Option<FramePayload>>>) {
+    ) -> Self {
         let (tx, rx) = mpsc::channel::<CameraControl>();
-        let frame_slot = Arc::new(Mutex::new(None));
-        let frame_slot_worker = Arc::clone(&frame_slot);
+        let (frame_tx, frame_rx) = tokio::sync::watch::channel(None);
+        if let Ok(mut lock) = GLOBAL_FRAME_RX.write() {
+            *lock = Some(frame_rx);
+        }
         let is_running = Arc::new(AtomicBool::new(true));
         let is_running_worker = Arc::clone(&is_running);
 
@@ -127,7 +135,7 @@ impl CameraManager {
             .spawn(move || {
                 run_capture_loop(
                     rx,
-                    frame_slot_worker,
+                    frame_tx,
                     is_running_worker,
                     initial_device,
                     initial_res,
@@ -135,26 +143,14 @@ impl CameraManager {
             })
             .expect("Failed to spawn camera thread");
 
-        (
-            Self {
-                command_tx: tx,
-                frame_slot: Arc::clone(&frame_slot),
-                is_running,
-            },
-            frame_slot,
-        )
+        Self {
+            command_tx: tx,
+            is_running,
+        }
     }
 
     pub fn send(&self, cmd: CameraControl) {
         let _ = self.command_tx.send(cmd);
-    }
-
-    pub fn take_latest_frame(&self) -> Option<FramePayload> {
-        if let Ok(mut lock) = self.frame_slot.lock() {
-            lock.take()
-        } else {
-            None
-        }
     }
 }
 
@@ -162,10 +158,13 @@ impl Drop for CameraManager {
     fn drop(&mut self) {
         self.is_running.store(false, Ordering::Relaxed);
         let _ = self.command_tx.send(CameraControl::Stop);
+        if let Ok(mut lock) = GLOBAL_FRAME_RX.write() {
+            *lock = None;
+        }
     }
 }
 
-fn open_camera(device_idx: u32, resolution: VideoResolution) -> Option<Camera> {
+pub fn open_camera(device_idx: u32, resolution: VideoResolution) -> Option<Camera> {
     let (w, h) = resolution.dimensions();
     let index = CameraIndex::Index(device_idx);
 
@@ -200,7 +199,7 @@ fn open_camera(device_idx: u32, resolution: VideoResolution) -> Option<Camera> {
 
 fn run_capture_loop(
     cmd_rx: mpsc::Receiver<CameraControl>,
-    frame_slot: Arc<Mutex<Option<FramePayload>>>,
+    frame_tx: tokio::sync::watch::Sender<Option<FramePayload>>,
     is_running: Arc<AtomicBool>,
     mut current_device: u32,
     mut current_res: VideoResolution,
@@ -344,14 +343,12 @@ fn run_capture_loop(
                             &mut scratch_buf,
                         );
 
-                        // Publish frame to slot
-                        if let Ok(mut slot) = frame_slot.lock() {
-                            *slot = Some(FramePayload {
-                                width: final_w,
-                                height: final_h,
-                                rgba: final_pixels,
-                            });
-                        }
+                        // Publish frame to event-driven watch stream
+                        let _ = frame_tx.send(Some(FramePayload {
+                            width: final_w,
+                            height: final_h,
+                            rgba: final_pixels,
+                        }));
                     }
                 }
                 Err(_) => {
