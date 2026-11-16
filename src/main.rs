@@ -1532,7 +1532,7 @@ fn shortcut_row<'a>(key_name: &'static str, description: &'static str) -> Elemen
     .into()
 }
 
-/// Helper function to render SVG icon element
+/// Helper function to render SVG icon element with crisp white tint
 fn render_svg<'a>(
     svg_str: &'static str,
     size: f32,
@@ -1543,7 +1543,7 @@ fn render_svg<'a>(
         .width(Length::Fixed(size))
         .height(Length::Fixed(size))
         .style(|_theme, _status| svg::Style {
-            color: None, // Inherits current button text_color dynamically (e.g. white on hover)
+            color: Some(Color::WHITE),
         })
         .into()
 }

@@ -188,14 +188,14 @@ pub fn clean_button_style(
                 ),
                 _ => (
                     Color::TRANSPARENT,
-                    COLOR_DANGER,
+                    COLOR_TEXT,
                 ),
             }
         } else if is_active {
             match status {
                 button::Status::Hovered | button::Status::Pressed => (
                     COLOR_ACTIVE_BG,
-                    COLOR_TEXT,
+                    Color::WHITE,
                 ),
                 _ => (
                     COLOR_SURFACE_MUTED,
@@ -206,11 +206,11 @@ pub fn clean_button_style(
             match status {
                 button::Status::Hovered | button::Status::Pressed => (
                     COLOR_SURFACE_MUTED,
-                    COLOR_TEXT,
+                    Color::WHITE,
                 ),
                 _ => (
                     Color::TRANSPARENT,
-                    COLOR_TEXT_MUTED,
+                    COLOR_TEXT,
                 ),
             }
         };
