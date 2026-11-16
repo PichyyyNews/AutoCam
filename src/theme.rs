@@ -24,13 +24,6 @@ pub const RADIUS_SM: Radius = Radius {
     bottom_left: 4.0,
 };
 
-pub const RADIUS_MD: Radius = Radius {
-    top_left: 8.0,
-    top_right: 8.0,
-    bottom_right: 8.0,
-    bottom_left: 8.0,
-};
-
 // Root Window Style - Zero white border, 100% flush rectangular dark frame
 pub fn root_window_style(_theme: &Theme) -> container::Style {
     container::Style {
@@ -111,15 +104,13 @@ pub fn tooltip_style(_theme: &Theme) -> container::Style {
     }
 }
 
-pub fn settings_dialog_style(_theme: &Theme) -> container::Style {
+pub fn settings_window_style(_theme: &Theme) -> container::Style {
     container::Style {
-        background: Some(Background::Color(Color::from_rgba(
-            0.07, 0.07, 0.08, 0.98,
-        ))),
+        background: Some(Background::Color(COLOR_BG)),
         border: Border {
-            color: COLOR_BORDER_ACTIVE,
+            color: COLOR_BORDER,
             width: 1.0,
-            radius: RADIUS_MD,
+            radius: Radius::default(),
         },
         shadow: Shadow::default(),
         text_color: Some(COLOR_TEXT),
