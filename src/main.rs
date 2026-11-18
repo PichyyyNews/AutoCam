@@ -3421,6 +3421,29 @@ fn with_resize_handles<'a>(content: Element<'a, Message>, window_id: window::Id)
 }
 
 fn main() -> iced::Result {
+    #[cfg(target_os = "windows")]
+    std::panic::set_hook(Box::new(|info| {
+        let err_text = format!("AutoCam encountered an unexpected error:\n\n{}\n\nPlease check permissions or hardware access.", info);
+        let _ = std::fs::write("autocam_crash.log", &err_text);
+        use std::ffi::OsStr;
+        use std::os::windows::ffi::OsStrExt;
+        let title: Vec<u16> = OsStr::new("AutoCam Startup Error")
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        let text: Vec<u16> = OsStr::new(&err_text)
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        #[link(name = "user32")]
+        unsafe extern "system" {
+            fn MessageBoxW(hwnd: usize, lp_text: *const u16, lp_caption: *const u16, u_type: u32) -> i32;
+        }
+        unsafe {
+            MessageBoxW(0, text.as_ptr(), title.as_ptr(), 0x10);
+        }
+    }));
+
     iced::daemon(AutoCamApp::boot, AutoCamApp::update, AutoCamApp::view)
         .subscription(AutoCamApp::subscription)
         .theme(AutoCamApp::theme)

@@ -6,21 +6,35 @@ use std::sync::Mutex;
 static DB_MUTEX: Mutex<()> = Mutex::new(());
 
 fn get_db_path() -> PathBuf {
+    // 1. Portable mode: Next to exe if directory is writable
     if let Ok(exe_path) = std::env::current_exe() {
         if let Some(parent) = exe_path.parent() {
             let candidate = parent.join("autocam.db");
-            // If the directory is writable, store next to exe
             if candidate.exists() || std::fs::OpenOptions::new().write(true).create(true).open(&candidate).is_ok() {
                 return candidate;
             }
         }
     }
-    PathBuf::from("autocam.db")
+
+    // 2. Standard Windows user AppData directory (%APPDATA%\AutoCam\autocam.db)
+    if let Ok(appdata) = std::env::var("APPDATA") {
+        let dir = PathBuf::from(appdata).join("AutoCam");
+        let _ = std::fs::create_dir_all(&dir);
+        let candidate = dir.join("autocam.db");
+        if candidate.exists() || std::fs::OpenOptions::new().write(true).create(true).open(&candidate).is_ok() {
+            return candidate;
+        }
+    }
+
+    // 3. System temp directory fallback (%TEMP%\AutoCam\autocam.db)
+    let temp_dir = std::env::temp_dir().join("AutoCam");
+    let _ = std::fs::create_dir_all(&temp_dir);
+    temp_dir.join("autocam.db")
 }
 
 fn open_connection() -> Result<Connection> {
     let path = get_db_path();
-    let conn = Connection::open(path)?;
+    let conn = Connection::open(&path).or_else(|_| Connection::open_in_memory())?;
 
     // Fast WAL configuration
     conn.execute_batch(
