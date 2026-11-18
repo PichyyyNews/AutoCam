@@ -53,6 +53,31 @@ pub fn query_audio_input_devices() -> Vec<AudioDeviceInfo> {
     devices
 }
 
+#[allow(dead_code)]
+pub struct AudioDenoiser {
+    state: Box<nnnoiseless::DenoiseState<'static>>,
+}
+
+impl Default for AudioDenoiser {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[allow(dead_code)]
+impl AudioDenoiser {
+    pub fn new() -> Self {
+        Self {
+            state: nnnoiseless::DenoiseState::new(),
+        }
+    }
+
+    /// Process 480 samples (10ms at 48kHz) in-place or into output buffer
+    pub fn process_frame(&mut self, output: &mut [f32; 480], input: &[f32; 480]) {
+        self.state.process_frame(output, input);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

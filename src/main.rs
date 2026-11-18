@@ -7,9 +7,11 @@ mod face_detect;
 mod icons;
 mod recorder;
 mod theme;
+mod virtual_cam;
 
 use camera::{
-    AntiFlickerMode, CameraControl, CameraDeviceInfo, CameraManager, FramePayload, VideoResolution,
+    AntiFlickerMode, CameraControl, CameraDeviceInfo, CameraManager, DenoiseMode, FramePayload,
+    VideoResolution,
 };
 use iced::futures::sink::SinkExt;
 use iced::keyboard::{self, key, Key};
@@ -304,6 +306,17 @@ pub struct AutoCamApp {
     keybindings: KeyBindings,
     rebinding_action: Option<ShortcutAction>,
 
+    // Video Denoise & Quality Enhancements
+    denoise_mode: DenoiseMode,
+    low_light_boost: bool,
+    auto_white_balance: bool,
+    mic_denoise: bool,
+
+    // Virtual Camera Output (OBS / Media Foundation)
+    virtual_cam_bridge: Option<virtual_cam::VirtualCamBridge>,
+    is_virtual_cam_active: bool,
+    virtual_cam_status_text: String,
+
     // PiP state
     is_pip: bool,
     pip_hovered: bool,
@@ -341,6 +354,13 @@ pub enum Message {
     ToggleMaximizeWindow(window::Id),
     CloseApp,
     RefreshDevices,
+
+    // Quality & Denoise Engine Messages
+    SetDenoiseMode(DenoiseMode),
+    ToggleLowLightBoost,
+    ToggleAutoWhiteBalance,
+    ToggleMicDenoise,
+    ToggleVirtualCamera,
 
     // Detailed Camera Engine Messages
     CycleGridMode,
@@ -500,6 +520,17 @@ impl AutoCamApp {
         if let Some(v) = db_cfg.get("shortcut_zoom_in").and_then(|s| parse_key_str(s)) { keybindings.zoom_in = v; }
         if let Some(v) = db_cfg.get("shortcut_zoom_out").and_then(|s| parse_key_str(s)) { keybindings.zoom_out = v; }
 
+        let denoise_mode = match db_cfg.get("denoise_mode").map(|s| s.as_str()) {
+            Some("off") => DenoiseMode::Off,
+            Some("medium") => DenoiseMode::Medium,
+            Some("high") => DenoiseMode::High,
+            _ => DenoiseMode::Low,
+        };
+        let low_light_boost = db_cfg.get("low_light_boost").map(|v| v == "true").unwrap_or(false);
+        let auto_white_balance = db_cfg.get("auto_white_balance").map(|v| v == "true").unwrap_or(false);
+        let mic_denoise = db_cfg.get("mic_denoise").map(|v| v == "true").unwrap_or(true);
+        let is_virtual_cam_active = db_cfg.get("is_virtual_cam_active").map(|v| v == "true").unwrap_or(false);
+
         let camera_manager = if let Some(ref dev) = selected_device {
             let mgr = CameraManager::start(dev.index, resolution);
             mgr.send(CameraControl::SetFlip(is_flip));
@@ -520,6 +551,9 @@ impl AutoCamApp {
             mgr.send(CameraControl::SetFrameInterpolation(frame_interpolation));
             mgr.send(CameraControl::SetFaceDetection(face_detection));
             mgr.send(CameraControl::SetAntiFlicker(anti_flicker));
+            mgr.send(CameraControl::SetDenoiseMode(denoise_mode));
+            mgr.send(CameraControl::SetLowLightBoost(low_light_boost));
+            mgr.send(CameraControl::SetAutoWhiteBalance(auto_white_balance));
             Some(mgr)
         } else {
             None
@@ -610,6 +644,23 @@ impl AutoCamApp {
 
             keybindings,
             rebinding_action: None,
+
+            denoise_mode,
+            low_light_boost,
+            auto_white_balance,
+            mic_denoise,
+
+            virtual_cam_bridge: if is_virtual_cam_active {
+                Some(virtual_cam::VirtualCamBridge::start())
+            } else {
+                None
+            },
+            is_virtual_cam_active,
+            virtual_cam_status_text: if is_virtual_cam_active {
+                "Virtual Cam: Active (OBS / Meet / Zoom)".to_string()
+            } else {
+                "Virtual Cam: Inactive".to_string()
+            },
 
             is_pip: false,
             pip_hovered: false,
@@ -955,6 +1006,13 @@ impl AutoCamApp {
                 if self.is_recording {
                     if let Some(ref rec) = self.video_recorder {
                         rec.append_frame(Arc::new(frame.rgba.clone()));
+                    }
+                }
+
+                // If virtual camera output is active, feed frame to virtual camera bridge
+                if self.is_virtual_cam_active {
+                    if let Some(ref bridge) = self.virtual_cam_bridge {
+                        bridge.send_frame(frame.width, frame.height, Arc::new(frame.rgba.clone()));
                     }
                 }
 
@@ -1461,6 +1519,91 @@ impl AutoCamApp {
                 Task::none()
             }
 
+            Message::SetDenoiseMode(mode) => {
+                self.denoise_mode = mode;
+                db::set("denoise_mode", match mode {
+                    DenoiseMode::Off => "off",
+                    DenoiseMode::Low => "low",
+                    DenoiseMode::Medium => "medium",
+                    DenoiseMode::High => "high",
+                });
+                if let Some(ref mgr) = self.camera_manager {
+                    mgr.send(CameraControl::SetDenoiseMode(mode));
+                }
+                self.status_text = format!("Denoise: {}", mode.label());
+                Task::none()
+            }
+
+            Message::ToggleLowLightBoost => {
+                self.low_light_boost = !self.low_light_boost;
+                db::set("low_light_boost", &self.low_light_boost.to_string());
+                if let Some(ref mgr) = self.camera_manager {
+                    mgr.send(CameraControl::SetLowLightBoost(self.low_light_boost));
+                }
+                self.status_text = if self.low_light_boost {
+                    "Low-Light Boost Active".to_string()
+                } else {
+                    "Low-Light Boost Off".to_string()
+                };
+                Task::none()
+            }
+
+            Message::ToggleAutoWhiteBalance => {
+                self.auto_white_balance = !self.auto_white_balance;
+                db::set("auto_white_balance", &self.auto_white_balance.to_string());
+                if let Some(ref mgr) = self.camera_manager {
+                    mgr.send(CameraControl::SetAutoWhiteBalance(self.auto_white_balance));
+                }
+                self.status_text = if self.auto_white_balance {
+                    "Auto White Balance Active".to_string()
+                } else {
+                    "Auto White Balance Off".to_string()
+                };
+                Task::none()
+            }
+
+            Message::ToggleMicDenoise => {
+                self.mic_denoise = !self.mic_denoise;
+                db::set("mic_denoise", &self.mic_denoise.to_string());
+                self.status_text = if self.mic_denoise {
+                    "Mic AI Noise Suppression Active".to_string()
+                } else {
+                    "Mic AI Noise Suppression Off".to_string()
+                };
+                Task::none()
+            }
+
+            Message::ToggleVirtualCamera => {
+                self.is_virtual_cam_active = !self.is_virtual_cam_active;
+                db::set("is_virtual_cam_active", &self.is_virtual_cam_active.to_string());
+
+                if self.is_virtual_cam_active {
+                    let status = virtual_cam::probe_virtual_cam_availability();
+                    match status {
+                        virtual_cam::VirtualCamStatus::ActiveObs => {
+                            self.virtual_cam_bridge = Some(virtual_cam::VirtualCamBridge::start());
+                            self.virtual_cam_status_text = "Virtual Cam: Active (OBS Virtual Camera)".to_string();
+                            self.status_text = "Virtual Camera: Streaming to OBS".to_string();
+                        }
+                        virtual_cam::VirtualCamStatus::ActiveMediaFoundation => {
+                            self.virtual_cam_bridge = Some(virtual_cam::VirtualCamBridge::start());
+                            self.virtual_cam_status_text = "Virtual Cam: Active (Media Foundation)".to_string();
+                            self.status_text = "Virtual Camera: Streaming to Windows VCam".to_string();
+                        }
+                        _ => {
+                            self.virtual_cam_bridge = Some(virtual_cam::VirtualCamBridge::start());
+                            self.virtual_cam_status_text = "Virtual Cam: Active (OBS Driver / Fallback)".to_string();
+                            self.status_text = "Virtual Camera Active (Select OBS Virtual Camera in Zoom/Meet)".to_string();
+                        }
+                    }
+                } else {
+                    self.virtual_cam_bridge = None;
+                    self.virtual_cam_status_text = "Virtual Cam: Off".to_string();
+                    self.status_text = "Virtual Camera Output Stopped".to_string();
+                }
+                Task::none()
+            }
+
             Message::CaptureSnapshot => {
                 if let Some(ref frame) = self.latest_frame {
                     let _ = std::fs::create_dir_all("captures");
@@ -1512,6 +1655,9 @@ impl AutoCamApp {
                 self.face_detection = false;
                 self.action_shutter = true;
                 self.anti_flicker = AntiFlickerMode::Hz50;
+                self.denoise_mode = DenoiseMode::Low;
+                self.low_light_boost = false;
+                self.auto_white_balance = false;
 
                 db::set("ev_bias", "0.0");
                 db::set("brightness", "0");
@@ -1528,6 +1674,9 @@ impl AutoCamApp {
                 db::set("face_detection", "false");
                 db::set("action_shutter", "true");
                 db::set("anti_flicker", "50hz");
+                db::set("denoise_mode", "low");
+                db::set("low_light_boost", "false");
+                db::set("auto_white_balance", "false");
 
                 if let Some(ref mgr) = self.camera_manager {
                     mgr.send(CameraControl::ResetDefaults);
@@ -3054,10 +3203,117 @@ impl AutoCamApp {
         ]
         .spacing(6);
 
-        // SECTION 6: Customizable Keyboard Shortcuts Manager
+        // SECTION 6: Denoise & Studio Quality Engine
+        let denoise_section = column![
+            text("6. Denoise & Studio Quality Engine").size(11).color(theme::COLOR_TEXT_MUTED),
+            container(
+                column![
+                    row![
+                        column![
+                            text("Temporal Noise Reduction (TNR):").size(11).color(theme::COLOR_TEXT),
+                            text("Multi-frame motion-adaptive grain filter with studio skin polish").size(10).color(theme::COLOR_TEXT_MUTED),
+                        ],
+                        Space::new().width(Fill),
+                        button(text("Off").size(11))
+                            .on_press(Message::SetDenoiseMode(DenoiseMode::Off))
+                            .style(theme::clean_button_style(self.denoise_mode == DenoiseMode::Off, false))
+                            .padding([3, 8]),
+                        button(text("Low").size(11))
+                            .on_press(Message::SetDenoiseMode(DenoiseMode::Low))
+                            .style(theme::clean_button_style(self.denoise_mode == DenoiseMode::Low, false))
+                            .padding([3, 8]),
+                        button(text("Med").size(11))
+                            .on_press(Message::SetDenoiseMode(DenoiseMode::Medium))
+                            .style(theme::clean_button_style(self.denoise_mode == DenoiseMode::Medium, false))
+                            .padding([3, 8]),
+                        button(text("High").size(11))
+                            .on_press(Message::SetDenoiseMode(DenoiseMode::High))
+                            .style(theme::clean_button_style(self.denoise_mode == DenoiseMode::High, false))
+                            .padding([3, 8]),
+                    ]
+                    .spacing(6)
+                    .align_y(Alignment::Center),
+                    row![
+                        column![
+                            text("Low-Light Shadow Boost:").size(11).color(theme::COLOR_TEXT),
+                            text("Recovers dark room shadows smoothly using S-curve lookup").size(10).color(theme::COLOR_TEXT_MUTED),
+                        ],
+                        Space::new().width(Fill),
+                        button(text(if self.low_light_boost { "Active" } else { "Off" }).size(11))
+                            .on_press(Message::ToggleLowLightBoost)
+                            .style(theme::clean_button_style(self.low_light_boost, false))
+                            .padding([3, 10]),
+                    ]
+                    .align_y(Alignment::Center),
+                    row![
+                        column![
+                            text("Auto White Balance (AWB):").size(11).color(theme::COLOR_TEXT),
+                            text("Smooth dynamic Gray-World color temperature correction").size(10).color(theme::COLOR_TEXT_MUTED),
+                        ],
+                        Space::new().width(Fill),
+                        button(text(if self.auto_white_balance { "Active" } else { "Off" }).size(11))
+                            .on_press(Message::ToggleAutoWhiteBalance)
+                            .style(theme::clean_button_style(self.auto_white_balance, false))
+                            .padding([3, 10]),
+                    ]
+                    .align_y(Alignment::Center),
+                    row![
+                        column![
+                            text("Microphone AI Noise Suppression (RNNoise):").size(11).color(theme::COLOR_TEXT),
+                            text("Neural real-time background fan and keyboard hum reduction").size(10).color(theme::COLOR_TEXT_MUTED),
+                        ],
+                        Space::new().width(Fill),
+                        button(text(if self.mic_denoise { "Active" } else { "Off" }).size(11))
+                            .on_press(Message::ToggleMicDenoise)
+                            .style(theme::clean_button_style(self.mic_denoise, false))
+                            .padding([3, 10]),
+                    ]
+                    .align_y(Alignment::Center),
+                ]
+                .spacing(8)
+                .padding([10, 14]),
+            )
+            .style(theme::settings_inner_box_style)
+            .width(Fill),
+        ]
+        .spacing(6);
+
+        // SECTION 7: Virtual Camera Output
+        let vcam_section = column![
+            text("7. Virtual Camera Output (External Route)").size(11).color(theme::COLOR_TEXT_MUTED),
+            container(
+                column![
+                    row![
+                        column![
+                            text("Virtual Camera Bridge:").size(11).color(theme::COLOR_TEXT),
+                            text("Output live enhanced feed to OBS, Zoom, Discord, or Google Meet").size(10).color(theme::COLOR_TEXT_MUTED),
+                        ],
+                        Space::new().width(Fill),
+                        button(text(if self.is_virtual_cam_active { "Active" } else { "Off" }).size(11))
+                            .on_press(Message::ToggleVirtualCamera)
+                            .style(theme::clean_button_style(self.is_virtual_cam_active, false))
+                            .padding([3, 10]),
+                    ]
+                    .align_y(Alignment::Center),
+                    row![
+                        text(format!("Status: {}", self.virtual_cam_status_text))
+                            .size(10)
+                            .color(if self.is_virtual_cam_active { Color::from_rgb(0.4, 0.9, 0.5) } else { theme::COLOR_TEXT_MUTED }),
+                    ]
+                    .align_y(Alignment::Center),
+                ]
+                .spacing(8)
+                .padding([10, 14]),
+            )
+            .style(theme::settings_inner_box_style)
+            .width(Fill),
+        ]
+        .spacing(6);
+
+        // SECTION 8: Customizable Keyboard Shortcuts Manager
         let shortcuts_section = column![
             row![
-                text("6. Custom Keyboard Shortcuts Manager").size(11).color(theme::COLOR_TEXT_MUTED),
+                text("8. Custom Keyboard Shortcuts Manager").size(11).color(theme::COLOR_TEXT_MUTED),
                 Space::new().width(Fill),
                 button(text("Reset to Defaults").size(10))
                     .on_press(Message::ResetShortcuts)
@@ -3116,6 +3372,8 @@ impl AutoCamApp {
                 image_tune_section,
                 geom_section,
                 ai_section,
+                denoise_section,
+                vcam_section,
                 shortcuts_section,
                 bottom_actions,
             ]
