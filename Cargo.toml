@@ -1,6 +1,6 @@
 [package]
 name = "autocam"
-version = "0.0.14"
+version = "0.0.15"
 edition = "2024"
 
 [dependencies]
@@ -9,8 +9,16 @@ nokhwa = { version = "0.10.11", features = ["input-native"] }
 rusqlite = { version = "0.43.0", features = ["bundled"] }
 image = "0.25"
 tokio = { version = "1", features = ["sync", "time"] }
-virtualcam = { version = "1.0.0", default-features = false, features = ["obs", "media-foundation"] }
 nnnoiseless = "0.5.2"
+
+[target.'cfg(windows)'.dependencies]
+virtualcam = { version = "1.0.0", default-features = false, features = ["obs", "media-foundation"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+virtualcam = { version = "1.0.0", default-features = false, features = ["v4l2"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+virtualcam = { version = "1.0.0", default-features = false }
 
 [build-dependencies]
 winres = "0.1"

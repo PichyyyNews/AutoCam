@@ -906,9 +906,14 @@ impl AutoCamApp {
                     }
                 } else {
                     let path_str = path.to_string_lossy().to_string();
+                    #[cfg(target_os = "windows")]
                     let _ = std::process::Command::new("cmd")
                         .args(["/C", "start", "", &path_str])
                         .spawn();
+                    #[cfg(target_os = "macos")]
+                    let _ = std::process::Command::new("open").arg(&path_str).spawn();
+                    #[cfg(target_os = "linux")]
+                    let _ = std::process::Command::new("xdg-open").arg(&path_str).spawn();
                     Task::none()
                 }
             }
@@ -973,8 +978,17 @@ impl AutoCamApp {
             }
 
             Message::OpenInExplorer(path) => {
+                #[cfg(target_os = "windows")]
                 let _ = std::process::Command::new("explorer")
                     .arg(format!("/select,{}", path.display()))
+                    .spawn();
+                #[cfg(target_os = "macos")]
+                let _ = std::process::Command::new("open")
+                    .args(["-R", &path.to_string_lossy()])
+                    .spawn();
+                #[cfg(target_os = "linux")]
+                let _ = std::process::Command::new("xdg-open")
+                    .arg(path.parent().unwrap_or(&path))
                     .spawn();
                 self.active_media_menu_idx = None;
                 Task::none()
@@ -990,9 +1004,16 @@ impl AutoCamApp {
             Message::CopyMedia(path) => {
                 let path_str = path.to_string_lossy().to_string();
                 self.active_media_menu_idx = None;
+                #[cfg(target_os = "windows")]
                 let _ = std::process::Command::new("powershell")
                     .args(["-NoProfile", "-Command", &format!("Set-Clipboard -Path '{}'", path_str.replace('\'', "''"))])
                     .spawn();
+                #[cfg(target_os = "macos")]
+                let _ = std::process::Command::new("osascript")
+                    .args(["-e", &format!("set the clipboard to (POSIX file \"{}\")", path_str)])
+                    .spawn();
+                #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+                let _ = iced::clipboard::write(path_str);
                 self.snapshot_toast = Some(("Media copied to clipboard".to_string(), Instant::now()));
                 Task::perform(
                     tokio::time::sleep(Duration::from_secs(2)),
@@ -1726,8 +1747,7 @@ impl AutoCamApp {
             }
 
             Message::OpenCapturesFolder => {
-                let _ = std::fs::create_dir_all(&self.captures_path);
-                let _ = std::process::Command::new("explorer").arg(&self.captures_path).spawn();
+                open_folder_in_file_manager(&self.captures_path);
                 Task::none()
             }
 
@@ -1856,7 +1876,7 @@ impl AutoCamApp {
                 let (path_str, _, _) = db::get_db_info();
                 let path = PathBuf::from(path_str);
                 if let Some(parent) = path.parent() {
-                    let _ = std::process::Command::new("explorer").arg(parent).spawn();
+                    open_folder_in_file_manager(parent);
                 }
                 Task::none()
             }
@@ -3757,9 +3777,18 @@ impl AutoCamApp {
         let (storage_photos, storage_videos, storage_bytes) = get_storage_stats(&self.captures_path);
         let storage_stats_text = format!("{} Photos • {} Videos • Total Space: {}", storage_photos, storage_videos, format_size(storage_bytes));
         let default_captures_path = PathBuf::from("captures");
-        let windows_pictures_path = std::env::var("USERPROFILE")
+        let user_pictures_path = std::env::var("USERPROFILE")
+            .or_else(|_| std::env::var("HOME"))
             .ok()
             .map(|u| PathBuf::from(u).join("Pictures").join("AutoCam"));
+
+        let file_manager_btn_label = if cfg!(target_os = "macos") {
+            "Open in Finder"
+        } else if cfg!(target_os = "linux") {
+            "Open in Files"
+        } else {
+            "Open in Explorer"
+        };
 
         let storage_section = column![
             text("9. Storage & Capture Data Management").size(11).color(theme::COLOR_TEXT_MUTED),
@@ -3771,7 +3800,7 @@ impl AutoCamApp {
                             text(format!("Path: {}", self.captures_path.to_string_lossy())).size(10).color(theme::COLOR_TEXT_MUTED),
                         ],
                         Space::new().width(Fill),
-                        button(text("Open in Explorer").size(11))
+                        button(text(file_manager_btn_label).size(11))
                             .on_press(Message::OpenCapturesFolder)
                             .style(theme::clean_button_style(false, false))
                             .padding([3, 10]),
@@ -3784,7 +3813,7 @@ impl AutoCamApp {
                             .on_press(Message::SetCapturesPath(default_captures_path.clone()))
                             .style(theme::clean_button_style(self.captures_path == default_captures_path, false))
                             .padding([2, 8]),
-                        if let Some(ref pic_path) = windows_pictures_path {
+                        if let Some(ref pic_path) = user_pictures_path {
                             let is_pic_active = &self.captures_path == pic_path;
                             button(text("Pictures Folder").size(10))
                                 .on_press(Message::SetCapturesPath(pic_path.clone()))
@@ -4240,6 +4269,16 @@ fn with_resize_handles<'a>(content: Element<'a, Message>, window_id: window::Id)
     .width(Fill)
     .height(Fill)
     .into()
+}
+
+fn open_folder_in_file_manager(folder: &std::path::Path) {
+    let _ = std::fs::create_dir_all(folder);
+    #[cfg(target_os = "windows")]
+    let _ = std::process::Command::new("explorer").arg(folder).spawn();
+    #[cfg(target_os = "macos")]
+    let _ = std::process::Command::new("open").arg(folder).spawn();
+    #[cfg(target_os = "linux")]
+    let _ = std::process::Command::new("xdg-open").arg(folder).spawn();
 }
 
 #[cfg(target_os = "windows")]
