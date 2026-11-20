@@ -1,4 +1,5 @@
 use iced::border::Radius;
+use iced::overlay::menu;
 use iced::widget::button;
 use iced::widget::container;
 use iced::widget::pick_list;
@@ -363,6 +364,29 @@ pub fn dots_button_style(_theme: &Theme, status: button::Status) -> button::Styl
         },
         shadow: Shadow::default(),
         ..Default::default()
+    }
+}
+
+pub fn danger_menu_item_style(theme: &Theme, status: button::Status) -> button::Style {
+    media_menu_btn_style(true)(theme, status)
+}
+
+pub fn menu_style(_theme: &Theme) -> menu::Style {
+    menu::Style {
+        text_color: COLOR_TEXT,
+        background: Background::Color(Color::from_rgb(0.12, 0.12, 0.15)),
+        border: Border {
+            color: COLOR_BORDER_ACTIVE,
+            width: 1.0,
+            radius: RADIUS_SM,
+        },
+        shadow: Shadow {
+            color: Color::from_rgba(0.0, 0.0, 0.0, 0.8),
+            offset: iced::Vector::new(0.0, 4.0),
+            blur_radius: 12.0,
+        },
+        selected_text_color: Color::WHITE,
+        selected_background: Background::Color(COLOR_ACTIVE_BG),
     }
 }
 

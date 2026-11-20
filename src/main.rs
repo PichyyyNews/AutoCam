@@ -10,8 +10,8 @@ mod theme;
 mod virtual_cam;
 
 use camera::{
-    AntiFlickerMode, CameraControl, CameraDeviceInfo, CameraManager, DenoiseMode, FramePayload,
-    VideoResolution,
+    AntiFlickerMode, CameraControl, CameraDeviceInfo, CameraManager, ColorProfile, DenoiseMode,
+    FramePayload, VideoResolution,
 };
 use iced::futures::sink::SinkExt;
 use iced::keyboard::{self, key, Key};
@@ -37,6 +37,8 @@ pub enum GridMode {
     Off,
     RuleOfThirds,
     CenterCrosshair,
+    GoldenRatio,
+    SafeMargin,
 }
 
 impl GridMode {
@@ -44,15 +46,19 @@ impl GridMode {
         match self {
             Self::Off => Self::RuleOfThirds,
             Self::RuleOfThirds => Self::CenterCrosshair,
-            Self::CenterCrosshair => Self::Off,
+            Self::CenterCrosshair => Self::GoldenRatio,
+            Self::GoldenRatio => Self::SafeMargin,
+            Self::SafeMargin => Self::Off,
         }
     }
 
     pub fn label(&self) -> &'static str {
         match self {
             Self::Off => "Grid: Off [G]",
-            Self::RuleOfThirds => "Grid: 3x3 Rule of Thirds [G]",
-            Self::CenterCrosshair => "Grid: Center Crosshair [G]",
+            Self::RuleOfThirds => "Grid: 3x3 Thirds [G]",
+            Self::CenterCrosshair => "Grid: Crosshair [G]",
+            Self::GoldenRatio => "Grid: Golden Ratio [G]",
+            Self::SafeMargin => "Grid: Safe Margin 90% [G]",
         }
     }
 }
@@ -178,10 +184,10 @@ fn format_size(bytes: u64) -> String {
     }
 }
 
-fn scan_captures_folder() -> Vec<MediaItem> {
+fn scan_captures_folder(captures_dir: &std::path::Path) -> Vec<MediaItem> {
     let mut items = Vec::new();
-    let captures_dir = PathBuf::from("captures");
-    if let Ok(entries) = std::fs::read_dir(&captures_dir) {
+    let _ = std::fs::create_dir_all(captures_dir);
+    if let Ok(entries) = std::fs::read_dir(captures_dir) {
         for entry in entries.flatten() {
             let path = entry.path();
             if !path.is_file() {
@@ -225,6 +231,32 @@ fn scan_captures_folder() -> Vec<MediaItem> {
     // Sort descending by modified date
     items.sort_by(|a, b| b.modified.cmp(&a.modified));
     items
+}
+
+fn get_storage_stats(captures_dir: &std::path::Path) -> (usize, usize, u64) {
+    let mut photos = 0;
+    let mut videos = 0;
+    let mut total_bytes = 0u64;
+
+    if let Ok(entries) = std::fs::read_dir(captures_dir) {
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if p.is_file() {
+                let ext = p.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+                let is_photo = ext == "png" || ext == "jpg" || ext == "jpeg";
+                let is_video = ext == "avi" || ext == "mp4" || ext == "mkv" || ext == "mov";
+                let len = entry.metadata().map(|m| m.len()).unwrap_or(0);
+                if is_photo {
+                    photos += 1;
+                    total_bytes += len;
+                } else if is_video {
+                    videos += 1;
+                    total_bytes += len;
+                }
+            }
+        }
+    }
+    (photos, videos, total_bytes)
 }
 
 #[derive(Debug, Clone)]
@@ -312,6 +344,20 @@ pub struct AutoCamApp {
     auto_white_balance: bool,
     mic_denoise: bool,
 
+    // Pro Photography & Color Tuning
+    manual_kelvin: u32,
+    iso_gain: f32,
+    color_profile: ColorProfile,
+
+    // Developer Telemetry & Performance Stats
+    show_telemetry: bool,
+    last_frame_instant: Option<Instant>,
+    live_fps: f32,
+    live_frame_time_ms: f32,
+
+    // Storage Configuration
+    captures_path: PathBuf,
+
     // Virtual Camera Output (OBS / Media Foundation)
     virtual_cam_bridge: Option<virtual_cam::VirtualCamBridge>,
     is_virtual_cam_active: bool,
@@ -361,6 +407,14 @@ pub enum Message {
     ToggleAutoWhiteBalance,
     ToggleMicDenoise,
     ToggleVirtualCamera,
+    SetManualKelvin(u32),
+    SetIsoGain(f32),
+    SetColorProfile(ColorProfile),
+    ToggleTelemetry,
+    SetCapturesPath(PathBuf),
+    PurgeAllCaptures,
+    ResetFactorySettings,
+    OpenDatabaseFolder,
 
     // Detailed Camera Engine Messages
     CycleGridMode,
@@ -457,11 +511,7 @@ impl AutoCamApp {
 
         let devices = CameraManager::query_available_devices();
         let selected_device = devices.first().cloned();
-        let supported_resolutions = if let Some(ref dev) = selected_device {
-            CameraManager::query_supported_resolutions(dev.index)
-        } else {
-            vec![VideoResolution::Hd720p, VideoResolution::Fhd1080p]
-        };
+        let supported_resolutions = vec![VideoResolution::Hd720p, VideoResolution::Fhd1080p];
 
         // 1. Restore Persistent Database Config
         let resolution = if let Some(res_str) = db_cfg.get("resolution") {
@@ -499,6 +549,8 @@ impl AutoCamApp {
         let grid_mode = match db_cfg.get("grid_mode").map(|s| s.as_str()) {
             Some("RuleOfThirds") => GridMode::RuleOfThirds,
             Some("CenterCrosshair") => GridMode::CenterCrosshair,
+            Some("GoldenRatio") => GridMode::GoldenRatio,
+            Some("SafeMargin") => GridMode::SafeMargin,
             _ => GridMode::Off,
         };
 
@@ -521,13 +573,23 @@ impl AutoCamApp {
         if let Some(v) = db_cfg.get("shortcut_zoom_out").and_then(|s| parse_key_str(s)) { keybindings.zoom_out = v; }
 
         let denoise_mode = match db_cfg.get("denoise_mode").map(|s| s.as_str()) {
-            Some("off") => DenoiseMode::Off,
+            Some("low") => DenoiseMode::Low,
             Some("medium") => DenoiseMode::Medium,
             Some("high") => DenoiseMode::High,
-            _ => DenoiseMode::Low,
+            _ => DenoiseMode::Off, // Default OFF as requested
         };
         let low_light_boost = db_cfg.get("low_light_boost").map(|v| v == "true").unwrap_or(false);
         let auto_white_balance = db_cfg.get("auto_white_balance").map(|v| v == "true").unwrap_or(false);
+        let manual_kelvin = db_cfg.get("manual_kelvin").and_then(|v| v.parse().ok()).unwrap_or(5500);
+        let iso_gain = db_cfg.get("iso_gain").and_then(|v| v.parse().ok()).unwrap_or(1.0);
+        let color_profile = match db_cfg.get("color_profile").map(|s| s.as_str()) {
+            Some("vivid") => ColorProfile::Vivid,
+            Some("cinemalog") => ColorProfile::CinemaLog,
+            Some("bw") => ColorProfile::BwMonochrome,
+            _ => ColorProfile::Neutral,
+        };
+        let show_telemetry = db_cfg.get("show_telemetry").map(|v| v == "true").unwrap_or(false);
+        let captures_path = db_cfg.get("captures_path").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("captures"));
         let mic_denoise = db_cfg.get("mic_denoise").map(|v| v == "true").unwrap_or(true);
         let is_virtual_cam_active = db_cfg.get("is_virtual_cam_active").map(|v| v == "true").unwrap_or(false);
 
@@ -554,18 +616,23 @@ impl AutoCamApp {
             mgr.send(CameraControl::SetDenoiseMode(denoise_mode));
             mgr.send(CameraControl::SetLowLightBoost(low_light_boost));
             mgr.send(CameraControl::SetAutoWhiteBalance(auto_white_balance));
+            mgr.send(CameraControl::SetManualKelvin(manual_kelvin));
+            mgr.send(CameraControl::SetIsoGain(iso_gain));
+            mgr.send(CameraControl::SetColorProfile(color_profile));
             Some(mgr)
         } else {
             None
         };
 
-        let status_text = if let Some(ref dev) = selected_device {
+        let status_text = if !crate::camera::is_media_foundation_available() {
+            "Windows Media Feature Pack required".to_string()
+        } else if let Some(ref dev) = selected_device {
             format!("Connected: {}", dev.name)
         } else {
             "No camera detected".to_string()
         };
 
-        let media_items = scan_captures_folder();
+        let media_items = scan_captures_folder(&captures_path);
         let latest_capture = media_items.first().cloned();
 
         let audio_devices = audio::query_audio_input_devices();
@@ -650,6 +717,15 @@ impl AutoCamApp {
             auto_white_balance,
             mic_denoise,
 
+            manual_kelvin,
+            iso_gain,
+            color_profile,
+            show_telemetry,
+            last_frame_instant: None,
+            live_fps: 60.0,
+            live_frame_time_ms: 16.6,
+            captures_path,
+
             virtual_cam_bridge: if is_virtual_cam_active {
                 Some(virtual_cam::VirtualCamBridge::start())
             } else {
@@ -695,7 +771,7 @@ impl AutoCamApp {
     }
 
     pub fn refresh_media_items(&mut self) {
-        self.media_items = scan_captures_folder();
+        self.media_items = scan_captures_folder(&self.captures_path);
         self.latest_capture = self.media_items.first().cloned();
     }
 
@@ -995,6 +1071,17 @@ impl AutoCamApp {
             Message::ToggleMaximizeWindow(id) => window::toggle_maximize(id),
 
             Message::FrameReceived(frame) => {
+                let now = Instant::now();
+                if let Some(prev) = self.last_frame_instant {
+                    let delta_s = prev.elapsed().as_secs_f32();
+                    if delta_s > 0.001 {
+                        let fps = 1.0 / delta_s;
+                        self.live_fps = self.live_fps * 0.90 + fps * 0.10;
+                        self.live_frame_time_ms = delta_s * 1000.0;
+                    }
+                }
+                self.last_frame_instant = Some(now);
+
                 self.is_loading_camera = false;
                 self.image_handle = Some(image::Handle::from_rgba(
                     frame.width,
@@ -1050,12 +1137,12 @@ impl AutoCamApp {
 
             Message::ToggleRecording => {
                 if !self.is_recording {
-                    let _ = std::fs::create_dir_all("captures");
+                    let _ = std::fs::create_dir_all(&self.captures_path);
                     let timestamp = SystemTime::now()
                         .duration_since(UNIX_EPOCH)
                         .map(|d| d.as_secs())
                         .unwrap_or(0);
-                    let path = PathBuf::from(format!("captures/autocam_rec_{}.avi", timestamp));
+                    let path = self.captures_path.join(format!("autocam_rec_{}.avi", timestamp));
                     let (w, h) = if let Some(ref frame) = self.latest_frame {
                         (frame.width, frame.height)
                     } else {
@@ -1365,6 +1452,8 @@ impl AutoCamApp {
                 db::set("grid_mode", match self.grid_mode {
                     GridMode::RuleOfThirds => "RuleOfThirds",
                     GridMode::CenterCrosshair => "CenterCrosshair",
+                    GridMode::GoldenRatio => "GoldenRatio",
+                    GridMode::SafeMargin => "SafeMargin",
                     GridMode::Off => "Off",
                 });
                 Task::none()
@@ -1375,6 +1464,8 @@ impl AutoCamApp {
                 db::set("grid_mode", match self.grid_mode {
                     GridMode::RuleOfThirds => "RuleOfThirds",
                     GridMode::CenterCrosshair => "CenterCrosshair",
+                    GridMode::GoldenRatio => "GoldenRatio",
+                    GridMode::SafeMargin => "SafeMargin",
                     GridMode::Off => "Off",
                 });
                 Task::none()
@@ -1606,15 +1697,16 @@ impl AutoCamApp {
 
             Message::CaptureSnapshot => {
                 if let Some(ref frame) = self.latest_frame {
-                    let _ = std::fs::create_dir_all("captures");
+                    let _ = std::fs::create_dir_all(&self.captures_path);
                     let timestamp = SystemTime::now()
                         .duration_since(UNIX_EPOCH)
                         .map(|d| d.as_secs())
                         .unwrap_or(0);
-                    let filename = format!("captures/autocam_{}.png", timestamp);
+                    let target_path = self.captures_path.join(format!("autocam_{}.png", timestamp));
+                    let path_str = target_path.to_string_lossy().to_string();
 
                     if ::image::save_buffer(
-                        &filename,
+                        &target_path,
                         &frame.rgba,
                         frame.width,
                         frame.height,
@@ -1622,7 +1714,7 @@ impl AutoCamApp {
                     )
                     .is_ok()
                     {
-                        self.snapshot_toast = Some((filename, Instant::now()));
+                        self.snapshot_toast = Some((path_str, Instant::now()));
                         self.refresh_media_items();
                         return Task::perform(
                             tokio::time::sleep(Duration::from_secs(3)),
@@ -1634,8 +1726,8 @@ impl AutoCamApp {
             }
 
             Message::OpenCapturesFolder => {
-                let _ = std::fs::create_dir_all("captures");
-                let _ = std::process::Command::new("explorer").arg("captures").spawn();
+                let _ = std::fs::create_dir_all(&self.captures_path);
+                let _ = std::process::Command::new("explorer").arg(&self.captures_path).spawn();
                 Task::none()
             }
 
@@ -1655,9 +1747,12 @@ impl AutoCamApp {
                 self.face_detection = false;
                 self.action_shutter = true;
                 self.anti_flicker = AntiFlickerMode::Hz50;
-                self.denoise_mode = DenoiseMode::Low;
+                self.denoise_mode = DenoiseMode::Off;
                 self.low_light_boost = false;
                 self.auto_white_balance = false;
+                self.manual_kelvin = 5500;
+                self.iso_gain = 1.0;
+                self.color_profile = ColorProfile::Neutral;
 
                 db::set("ev_bias", "0.0");
                 db::set("brightness", "0");
@@ -1674,13 +1769,129 @@ impl AutoCamApp {
                 db::set("face_detection", "false");
                 db::set("action_shutter", "true");
                 db::set("anti_flicker", "50hz");
-                db::set("denoise_mode", "low");
+                db::set("denoise_mode", "off");
                 db::set("low_light_boost", "false");
                 db::set("auto_white_balance", "false");
+                db::set("manual_kelvin", "5500");
+                db::set("iso_gain", "1.0");
+                db::set("color_profile", "neutral");
 
                 if let Some(ref mgr) = self.camera_manager {
                     mgr.send(CameraControl::ResetDefaults);
                 }
+                Task::none()
+            }
+
+            Message::SetManualKelvin(k) => {
+                self.manual_kelvin = k;
+                db::set("manual_kelvin", &k.to_string());
+                if let Some(ref mgr) = self.camera_manager {
+                    mgr.send(CameraControl::SetManualKelvin(k));
+                }
+                self.status_text = format!("Color Temperature: {}K", k);
+                Task::none()
+            }
+
+            Message::SetIsoGain(iso) => {
+                self.iso_gain = iso;
+                db::set("iso_gain", &format!("{:.2}", iso));
+                if let Some(ref mgr) = self.camera_manager {
+                    mgr.send(CameraControl::SetIsoGain(iso));
+                }
+                let simulated_iso = (iso * 100.0) as u32;
+                self.status_text = format!("ISO Sensitivity: ~{}", simulated_iso);
+                Task::none()
+            }
+
+            Message::SetColorProfile(cp) => {
+                self.color_profile = cp;
+                db::set("color_profile", match cp {
+                    ColorProfile::Neutral => "neutral",
+                    ColorProfile::Vivid => "vivid",
+                    ColorProfile::CinemaLog => "cinemalog",
+                    ColorProfile::BwMonochrome => "bw",
+                });
+                if let Some(ref mgr) = self.camera_manager {
+                    mgr.send(CameraControl::SetColorProfile(cp));
+                }
+                self.status_text = format!("Picture Profile: {}", cp.label());
+                Task::none()
+            }
+
+            Message::ToggleTelemetry => {
+                self.show_telemetry = !self.show_telemetry;
+                db::set("show_telemetry", &self.show_telemetry.to_string());
+                self.status_text = if self.show_telemetry {
+                    "Telemetry HUD Active".to_string()
+                } else {
+                    "Telemetry HUD Off".to_string()
+                };
+                Task::none()
+            }
+
+            Message::SetCapturesPath(path) => {
+                let _ = std::fs::create_dir_all(&path);
+                self.captures_path = path.clone();
+                db::set("captures_path", &path.to_string_lossy());
+                self.refresh_media_items();
+                self.status_text = format!("Storage path: {}", path.to_string_lossy());
+                Task::none()
+            }
+
+            Message::PurgeAllCaptures => {
+                if let Ok(entries) = std::fs::read_dir(&self.captures_path) {
+                    for entry in entries.flatten() {
+                        let p = entry.path();
+                        if p.is_file() {
+                            let _ = std::fs::remove_file(p);
+                        }
+                    }
+                }
+                self.refresh_media_items();
+                self.status_text = "All captures cleared from storage".to_string();
+                Task::none()
+            }
+
+            Message::OpenDatabaseFolder => {
+                let (path_str, _, _) = db::get_db_info();
+                let path = PathBuf::from(path_str);
+                if let Some(parent) = path.parent() {
+                    let _ = std::process::Command::new("explorer").arg(parent).spawn();
+                }
+                Task::none()
+            }
+
+            Message::ResetFactorySettings => {
+                db::reset_factory_defaults();
+                self.ev_bias = 0.0;
+                self.brightness = 0;
+                self.contrast = 1.0;
+                self.saturation = 1.0;
+                self.zoom_level = 1.0;
+                self.is_flip = true;
+                self.rotation_deg = 0;
+                self.focus_peaking = false;
+                self.peaking_threshold = 55;
+                self.cas_sharpen = true;
+                self.cas_intensity = 0.45;
+                self.frame_interpolation = false;
+                self.face_detection = false;
+                self.action_shutter = true;
+                self.anti_flicker = AntiFlickerMode::Hz50;
+                self.denoise_mode = DenoiseMode::Off;
+                self.low_light_boost = false;
+                self.auto_white_balance = false;
+                self.manual_kelvin = 5500;
+                self.iso_gain = 1.0;
+                self.color_profile = ColorProfile::Neutral;
+                self.captures_path = PathBuf::from("captures");
+                self.show_telemetry = false;
+
+                if let Some(ref mgr) = self.camera_manager {
+                    mgr.send(CameraControl::ResetDefaults);
+                }
+                self.refresh_media_items();
+                self.status_text = "Factory reset: Database & settings restored".to_string();
                 Task::none()
             }
 
@@ -1776,6 +1987,7 @@ impl AutoCamApp {
                         Message::DeviceSelected,
                     )
                     .style(theme::pick_list_style)
+                    .menu_style(theme::menu_style)
                     .text_size(11)
                     .padding([3, 8]),
                     // Resolution Toggle Button
@@ -1800,6 +2012,7 @@ impl AutoCamApp {
                         Message::AudioDeviceSelected,
                     )
                     .style(theme::pick_list_style)
+                    .menu_style(theme::menu_style)
                     .text_size(11)
                     .padding([3, 8]),
                     render_icon_btn(
@@ -1977,6 +2190,71 @@ impl AutoCamApp {
 
                 viewport_stack = viewport_stack.push(crosshair);
             }
+            GridMode::GoldenRatio => {
+                let golden_lines: Element<'_, Message> = container(
+                    stack![
+                        column![
+                            Space::new().height(Length::FillPortion(382)),
+                            container(Space::new().width(Fill).height(Length::Fixed(1.0)))
+                                .style(|_: &Theme| container::Style {
+                                    background: Some(Background::Color(Color::from_rgba(1.0, 0.85, 0.4, 0.25))),
+                                    ..Default::default()
+                                }),
+                            Space::new().height(Length::FillPortion(236)),
+                            container(Space::new().width(Fill).height(Length::Fixed(1.0)))
+                                .style(|_: &Theme| container::Style {
+                                    background: Some(Background::Color(Color::from_rgba(1.0, 0.85, 0.4, 0.25))),
+                                    ..Default::default()
+                                }),
+                            Space::new().height(Length::FillPortion(382)),
+                        ]
+                        .width(Fill)
+                        .height(Fill),
+                        row![
+                            Space::new().width(Length::FillPortion(382)),
+                            container(Space::new().width(Length::Fixed(1.0)).height(Fill))
+                                .style(|_: &Theme| container::Style {
+                                    background: Some(Background::Color(Color::from_rgba(1.0, 0.85, 0.4, 0.25))),
+                                    ..Default::default()
+                                }),
+                            Space::new().width(Length::FillPortion(236)),
+                            container(Space::new().width(Length::Fixed(1.0)).height(Fill))
+                                .style(|_: &Theme| container::Style {
+                                    background: Some(Background::Color(Color::from_rgba(1.0, 0.85, 0.4, 0.25))),
+                                    ..Default::default()
+                                }),
+                            Space::new().width(Length::FillPortion(382)),
+                        ]
+                        .width(Fill)
+                        .height(Fill),
+                    ]
+                    .width(Fill)
+                    .height(Fill),
+                )
+                .center(Fill)
+                .into();
+
+                viewport_stack = viewport_stack.push(golden_lines);
+            }
+            GridMode::SafeMargin => {
+                let safe_box: Element<'_, Message> = container(
+                    container(Space::new().width(Fill).height(Fill))
+                        .style(|_: &Theme| container::Style {
+                            border: iced::Border {
+                                color: Color::from_rgba(1.0, 1.0, 1.0, 0.35),
+                                width: 1.0,
+                                radius: 4.0.into(),
+                            },
+                            ..Default::default()
+                        })
+                        .width(Length::FillPortion(9))
+                        .height(Length::FillPortion(9))
+                )
+                .center(Fill)
+                .into();
+
+                viewport_stack = viewport_stack.push(safe_box);
+            }
         }
 
         // Micro Loading Overlay
@@ -1997,6 +2275,55 @@ impl AutoCamApp {
             .into();
 
             viewport_stack = viewport_stack.push(loader);
+        }
+
+        // Developer / Pro Telemetry Overlay (FPS, Frame Time, Resolution, Color Profile, VCam)
+        if self.show_telemetry {
+            let tele_overlay: Element<'_, Message> = container(
+                row![
+                    container(
+                        row![
+                            text(format!("{:.1} FPS", self.live_fps))
+                                .size(10)
+                                .color(if self.live_fps >= 50.0 { Color::from_rgb(0.4, 0.9, 0.5) } else { Color::from_rgb(0.9, 0.8, 0.3) }),
+                            text("•").size(9).color(theme::COLOR_TEXT_MUTED),
+                            text(format!("{:.1} ms", self.live_frame_time_ms))
+                                .size(10)
+                                .color(theme::COLOR_TEXT),
+                            text("•").size(9).color(theme::COLOR_TEXT_MUTED),
+                            text(self.resolution.label())
+                                .size(10)
+                                .color(theme::COLOR_TEXT),
+                            text("•").size(9).color(theme::COLOR_TEXT_MUTED),
+                            text(self.color_profile.label())
+                                .size(10)
+                                .color(theme::COLOR_TEXT_MUTED),
+                            if self.is_virtual_cam_active {
+                                row![
+                                    text("•").size(9).color(theme::COLOR_TEXT_MUTED),
+                                    text("VCam ON")
+                                        .size(10)
+                                        .color(Color::from_rgb(0.4, 0.9, 0.5)),
+                                ].spacing(4).align_y(Alignment::Center)
+                            } else {
+                                row![].into()
+                            },
+                        ]
+                        .spacing(6)
+                        .align_y(Alignment::Center)
+                        .padding([4, 8]),
+                    )
+                    .style(theme::tooltip_style),
+                ]
+                .padding([10, 14])
+            )
+            .align_x(Alignment::Start)
+            .align_y(Alignment::Start)
+            .width(Fill)
+            .height(Fill)
+            .into();
+
+            viewport_stack = viewport_stack.push(tele_overlay);
         }
 
         // Snapshot Toast Notification
@@ -2934,6 +3261,7 @@ impl AutoCamApp {
                             Message::DeviceSelected,
                         )
                         .style(theme::pick_list_style)
+                        .menu_style(theme::menu_style)
                         .text_size(11)
                         .padding([3, 8]),
                         render_icon_btn(
@@ -3016,13 +3344,93 @@ impl AutoCamApp {
         ]
         .spacing(6);
 
-        // SECTION 3: Exposure, Contrast, Brightness & Saturation
+        // SECTION 3: Pro Exposure, ISO Sensitivity & Color Temperature (Kelvin)
         let image_tune_section = column![
-            text("3. Precision DSP Tuning (Clean White Rails)").size(11).color(theme::COLOR_TEXT_MUTED),
+            text("3. Pro Optical Exposure, ISO & White Balance").size(11).color(theme::COLOR_TEXT_MUTED),
             container(
                 column![
                     row![
-                        text(format!("Brightness: {}", self.brightness)).size(11).color(theme::COLOR_TEXT),
+                        column![
+                            text("Auto Exposure (AE):").size(11).color(theme::COLOR_TEXT),
+                            text("Dynamic ambient light metering & auto shutter/gain").size(10).color(theme::COLOR_TEXT_MUTED),
+                        ],
+                        Space::new().width(Fill),
+                        button(text(if self.auto_ev { "Active" } else { "Off" }).size(11))
+                            .on_press(Message::ToggleAutoEv)
+                            .style(theme::clean_button_style(self.auto_ev, false))
+                            .padding([3, 10]),
+                    ]
+                    .align_y(Alignment::Center),
+                    row![
+                        text(format!("Exposure Bias (EV): {:+.1} EV", self.ev_bias)).size(11).color(theme::COLOR_TEXT),
+                        Space::new().width(Fill),
+                        slider(-3.0..=3.0, self.ev_bias, Message::SetEvBias)
+                            .step(0.1)
+                            .style(theme::clean_slider_style)
+                            .width(Length::Fixed(200.0)),
+                    ]
+                    .align_y(Alignment::Center),
+                    row![
+                        text(format!("ISO Sensitivity: ~{} ({:.1}x)", (self.iso_gain * 100.0) as u32, self.iso_gain)).size(11).color(theme::COLOR_TEXT),
+                        Space::new().width(Fill),
+                        slider(1.0..=6.0, self.iso_gain, Message::SetIsoGain)
+                            .step(0.1)
+                            .style(theme::clean_slider_style)
+                            .width(Length::Fixed(200.0)),
+                    ]
+                    .align_y(Alignment::Center),
+                    row![
+                        column![
+                            text("Auto White Balance (AWB):").size(11).color(theme::COLOR_TEXT),
+                            text("Dynamic Gray-World chromatic adaptation").size(10).color(theme::COLOR_TEXT_MUTED),
+                        ],
+                        Space::new().width(Fill),
+                        button(text(if self.auto_white_balance { "Auto [AWB]" } else { "Manual Kelvin" }).size(11))
+                            .on_press(Message::ToggleAutoWhiteBalance)
+                            .style(theme::clean_button_style(self.auto_white_balance, false))
+                            .padding([3, 10]),
+                    ]
+                    .align_y(Alignment::Center),
+                    if !self.auto_white_balance {
+                        column![
+                            row![
+                                text(format!("Color Temperature: {}K", self.manual_kelvin)).size(11).color(theme::COLOR_TEXT),
+                                Space::new().width(Fill),
+                                slider(2800..=7500, self.manual_kelvin, Message::SetManualKelvin)
+                                    .step(50u32)
+                                    .style(theme::clean_slider_style)
+                                    .width(Length::Fixed(200.0)),
+                            ]
+                            .align_y(Alignment::Center),
+                            row![
+                                text("Kelvin Presets:").size(10).color(theme::COLOR_TEXT_MUTED),
+                                Space::new().width(Fill),
+                                button(text("3200K Tungsten").size(10))
+                                    .on_press(Message::SetManualKelvin(3200))
+                                    .style(theme::clean_button_style(self.manual_kelvin == 3200, false))
+                                    .padding([2, 6]),
+                                button(text("4000K Fluorescent").size(10))
+                                    .on_press(Message::SetManualKelvin(4000))
+                                    .style(theme::clean_button_style(self.manual_kelvin == 4000, false))
+                                    .padding([2, 6]),
+                                button(text("5500K Daylight").size(10))
+                                    .on_press(Message::SetManualKelvin(5500))
+                                    .style(theme::clean_button_style(self.manual_kelvin == 5500, false))
+                                    .padding([2, 6]),
+                                button(text("6500K Cloudy").size(10))
+                                    .on_press(Message::SetManualKelvin(6500))
+                                    .style(theme::clean_button_style(self.manual_kelvin == 6500, false))
+                                    .padding([2, 6]),
+                            ]
+                            .spacing(6)
+                            .align_y(Alignment::Center),
+                        ]
+                        .spacing(6)
+                    } else {
+                        column![].into()
+                    },
+                    row![
+                        text(format!("Brightness Offset: {}", self.brightness)).size(11).color(theme::COLOR_TEXT),
                         Space::new().width(Fill),
                         slider(-100..=100, self.brightness, Message::SetBrightness)
                             .style(theme::clean_slider_style)
@@ -3030,7 +3438,7 @@ impl AutoCamApp {
                     ]
                     .align_y(Alignment::Center),
                     row![
-                        text(format!("Contrast: {:.2}x", self.contrast)).size(11).color(theme::COLOR_TEXT),
+                        text(format!("Contrast Curve: {:.2}x", self.contrast)).size(11).color(theme::COLOR_TEXT),
                         Space::new().width(Fill),
                         slider(0.5..=2.0, self.contrast, Message::SetContrast)
                             .step(0.05)
@@ -3039,7 +3447,7 @@ impl AutoCamApp {
                     ]
                     .align_y(Alignment::Center),
                     row![
-                        text(format!("Saturation: {:.2}x", self.saturation)).size(11).color(theme::COLOR_TEXT),
+                        text(format!("Color Saturation: {:.2}x", self.saturation)).size(11).color(theme::COLOR_TEXT),
                         Space::new().width(Fill),
                         slider(0.0..=2.0, self.saturation, Message::SetSaturation)
                             .step(0.05)
@@ -3056,9 +3464,48 @@ impl AutoCamApp {
         ]
         .spacing(6);
 
-        // SECTION 4: Geometric Orientation & Zoom
+        // SECTION 4: Creative Picture Profile & Film Look
+        let profile_section = column![
+            text("4. Creative Picture Profile & Tone Curve").size(11).color(theme::COLOR_TEXT_MUTED),
+            container(
+                column![
+                    row![
+                        column![
+                            text("Profile Emulation:").size(11).color(theme::COLOR_TEXT),
+                            text("Color science curves for live presentation & post-production").size(10).color(theme::COLOR_TEXT_MUTED),
+                        ],
+                        Space::new().width(Fill),
+                        button(text("Neutral").size(11))
+                            .on_press(Message::SetColorProfile(ColorProfile::Neutral))
+                            .style(theme::clean_button_style(self.color_profile == ColorProfile::Neutral, false))
+                            .padding([3, 8]),
+                        button(text("Vivid").size(11))
+                            .on_press(Message::SetColorProfile(ColorProfile::Vivid))
+                            .style(theme::clean_button_style(self.color_profile == ColorProfile::Vivid, false))
+                            .padding([3, 8]),
+                        button(text("Cinema Log").size(11))
+                            .on_press(Message::SetColorProfile(ColorProfile::CinemaLog))
+                            .style(theme::clean_button_style(self.color_profile == ColorProfile::CinemaLog, false))
+                            .padding([3, 8]),
+                        button(text("B&W").size(11))
+                            .on_press(Message::SetColorProfile(ColorProfile::BwMonochrome))
+                            .style(theme::clean_button_style(self.color_profile == ColorProfile::BwMonochrome, false))
+                            .padding([3, 8]),
+                    ]
+                    .spacing(6)
+                    .align_y(Alignment::Center),
+                ]
+                .spacing(8)
+                .padding([10, 14]),
+            )
+            .style(theme::settings_inner_box_style)
+            .width(Fill),
+        ]
+        .spacing(6);
+
+        // SECTION 5: Geometric Orientation, Zoom & Framing
         let geom_section = column![
-            text("4. Geometry & Composition").size(11).color(theme::COLOR_TEXT_MUTED),
+            text("5. Geometry & Composition Framing").size(11).color(theme::COLOR_TEXT_MUTED),
             container(
                 column![
                     row![
@@ -3101,6 +3548,32 @@ impl AutoCamApp {
                     ]
                     .spacing(6)
                     .align_y(Alignment::Center),
+                    row![
+                        text("Composition Grid:").size(11).color(theme::COLOR_TEXT),
+                        Space::new().width(Fill),
+                        button(text("Off").size(11))
+                            .on_press(Message::SetGridMode(GridMode::Off))
+                            .style(theme::clean_button_style(self.grid_mode == GridMode::Off, false))
+                            .padding([3, 8]),
+                        button(text("3x3 Thirds").size(11))
+                            .on_press(Message::SetGridMode(GridMode::RuleOfThirds))
+                            .style(theme::clean_button_style(self.grid_mode == GridMode::RuleOfThirds, false))
+                            .padding([3, 8]),
+                        button(text("Crosshair").size(11))
+                            .on_press(Message::SetGridMode(GridMode::CenterCrosshair))
+                            .style(theme::clean_button_style(self.grid_mode == GridMode::CenterCrosshair, false))
+                            .padding([3, 8]),
+                        button(text("Golden Ratio φ").size(11))
+                            .on_press(Message::SetGridMode(GridMode::GoldenRatio))
+                            .style(theme::clean_button_style(self.grid_mode == GridMode::GoldenRatio, false))
+                            .padding([3, 8]),
+                        button(text("Safe 90%").size(11))
+                            .on_press(Message::SetGridMode(GridMode::SafeMargin))
+                            .style(theme::clean_button_style(self.grid_mode == GridMode::SafeMargin, false))
+                            .padding([3, 8]),
+                    ]
+                    .spacing(6)
+                    .align_y(Alignment::Center),
                 ]
                 .spacing(8)
                 .padding([10, 14]),
@@ -3110,9 +3583,9 @@ impl AutoCamApp {
         ]
         .spacing(6);
 
-        // SECTION 5: AI & DSP Enhancements (CAS, Peaking, Face HUD)
+        // SECTION 6: AI, DSP Filters & Focus Assist
         let ai_section = column![
-            text("5. DSP Filters & Face Tracking").size(11).color(theme::COLOR_TEXT_MUTED),
+            text("6. AI, DSP Filters & Focus Assist").size(11).color(theme::COLOR_TEXT_MUTED),
             container(
                 column![
                     row![
@@ -3176,24 +3649,6 @@ impl AutoCamApp {
                             .padding([3, 10]),
                     ]
                     .align_y(Alignment::Center),
-                    row![
-                        text("Composition Grid:").size(11).color(theme::COLOR_TEXT),
-                        Space::new().width(Fill),
-                        button(text("Off").size(11))
-                            .on_press(Message::SetGridMode(GridMode::Off))
-                            .style(theme::clean_button_style(self.grid_mode == GridMode::Off, false))
-                            .padding([3, 8]),
-                        button(text("3x3 Thirds").size(11))
-                            .on_press(Message::SetGridMode(GridMode::RuleOfThirds))
-                            .style(theme::clean_button_style(self.grid_mode == GridMode::RuleOfThirds, false))
-                            .padding([3, 8]),
-                        button(text("Crosshair").size(11))
-                            .on_press(Message::SetGridMode(GridMode::CenterCrosshair))
-                            .style(theme::clean_button_style(self.grid_mode == GridMode::CenterCrosshair, false))
-                            .padding([3, 8]),
-                    ]
-                    .spacing(6)
-                    .align_y(Alignment::Center),
                 ]
                 .spacing(8)
                 .padding([10, 14]),
@@ -3203,9 +3658,9 @@ impl AutoCamApp {
         ]
         .spacing(6);
 
-        // SECTION 6: Denoise & Studio Quality Engine
+        // SECTION 7: Denoise & Studio Quality Engine
         let denoise_section = column![
-            text("6. Denoise & Studio Quality Engine").size(11).color(theme::COLOR_TEXT_MUTED),
+            text("7. Denoise & Studio Quality Engine").size(11).color(theme::COLOR_TEXT_MUTED),
             container(
                 column![
                     row![
@@ -3247,18 +3702,6 @@ impl AutoCamApp {
                     .align_y(Alignment::Center),
                     row![
                         column![
-                            text("Auto White Balance (AWB):").size(11).color(theme::COLOR_TEXT),
-                            text("Smooth dynamic Gray-World color temperature correction").size(10).color(theme::COLOR_TEXT_MUTED),
-                        ],
-                        Space::new().width(Fill),
-                        button(text(if self.auto_white_balance { "Active" } else { "Off" }).size(11))
-                            .on_press(Message::ToggleAutoWhiteBalance)
-                            .style(theme::clean_button_style(self.auto_white_balance, false))
-                            .padding([3, 10]),
-                    ]
-                    .align_y(Alignment::Center),
-                    row![
-                        column![
                             text("Microphone AI Noise Suppression (RNNoise):").size(11).color(theme::COLOR_TEXT),
                             text("Neural real-time background fan and keyboard hum reduction").size(10).color(theme::COLOR_TEXT_MUTED),
                         ],
@@ -3278,9 +3721,9 @@ impl AutoCamApp {
         ]
         .spacing(6);
 
-        // SECTION 7: Virtual Camera Output
+        // SECTION 8: Virtual Camera Output (External Route)
         let vcam_section = column![
-            text("7. Virtual Camera Output (External Route)").size(11).color(theme::COLOR_TEXT_MUTED),
+            text("8. Virtual Camera Output (External Route)").size(11).color(theme::COLOR_TEXT_MUTED),
             container(
                 column![
                     row![
@@ -3310,10 +3753,128 @@ impl AutoCamApp {
         ]
         .spacing(6);
 
-        // SECTION 8: Customizable Keyboard Shortcuts Manager
+        // SECTION 9: Storage & Capture Data Management
+        let (storage_photos, storage_videos, storage_bytes) = get_storage_stats(&self.captures_path);
+        let storage_stats_text = format!("{} Photos • {} Videos • Total Space: {}", storage_photos, storage_videos, format_size(storage_bytes));
+        let default_captures_path = PathBuf::from("captures");
+        let windows_pictures_path = std::env::var("USERPROFILE")
+            .ok()
+            .map(|u| PathBuf::from(u).join("Pictures").join("AutoCam"));
+
+        let storage_section = column![
+            text("9. Storage & Capture Data Management").size(11).color(theme::COLOR_TEXT_MUTED),
+            container(
+                column![
+                    row![
+                        column![
+                            text("Captures Storage Directory:").size(11).color(theme::COLOR_TEXT),
+                            text(format!("Path: {}", self.captures_path.to_string_lossy())).size(10).color(theme::COLOR_TEXT_MUTED),
+                        ],
+                        Space::new().width(Fill),
+                        button(text("Open in Explorer").size(11))
+                            .on_press(Message::OpenCapturesFolder)
+                            .style(theme::clean_button_style(false, false))
+                            .padding([3, 10]),
+                    ]
+                    .align_y(Alignment::Center),
+                    row![
+                        text("Quick Location Presets:").size(10).color(theme::COLOR_TEXT_MUTED),
+                        Space::new().width(Fill),
+                        button(text("Default (./captures)").size(10))
+                            .on_press(Message::SetCapturesPath(default_captures_path.clone()))
+                            .style(theme::clean_button_style(self.captures_path == default_captures_path, false))
+                            .padding([2, 8]),
+                        if let Some(ref pic_path) = windows_pictures_path {
+                            let is_pic_active = &self.captures_path == pic_path;
+                            button(text("Pictures Folder").size(10))
+                                .on_press(Message::SetCapturesPath(pic_path.clone()))
+                                .style(theme::clean_button_style(is_pic_active, false))
+                                .padding([2, 8])
+                        } else {
+                            button(text("").size(0)).padding([0, 0])
+                        },
+                    ]
+                    .spacing(6)
+                    .align_y(Alignment::Center),
+                    row![
+                        column![
+                            text("Disk Space Occupied:").size(11).color(theme::COLOR_TEXT),
+                            text(storage_stats_text).size(10).color(theme::COLOR_TEXT_MUTED),
+                        ],
+                        Space::new().width(Fill),
+                        button(text("Purge All Media").size(11))
+                            .on_press(Message::PurgeAllCaptures)
+                            .style(theme::danger_menu_item_style)
+                            .padding([3, 10]),
+                    ]
+                    .align_y(Alignment::Center),
+                ]
+                .spacing(10)
+                .padding([10, 14]),
+            )
+            .style(theme::settings_inner_box_style)
+            .width(Fill),
+        ]
+        .spacing(6);
+
+        // SECTION 10: Database & Developer Diagnostics
+        let (db_path_str, db_size_bytes, db_key_count) = db::get_db_info();
+        let db_stats_text = format!("Size: {} • Stored Keys: {} (SQLite WAL mode)", format_size(db_size_bytes), db_key_count);
+
+        let dev_tools_section = column![
+            text("10. Database & Developer Diagnostics").size(11).color(theme::COLOR_TEXT_MUTED),
+            container(
+                column![
+                    row![
+                        column![
+                            text("Real-Time Telemetry HUD Overlay:").size(11).color(theme::COLOR_TEXT),
+                            text("Shows live FPS, frame latency (ms), resolution & status on viewport").size(10).color(theme::COLOR_TEXT_MUTED),
+                        ],
+                        Space::new().width(Fill),
+                        button(text(if self.show_telemetry { "Active" } else { "Off" }).size(11))
+                            .on_press(Message::ToggleTelemetry)
+                            .style(theme::clean_button_style(self.show_telemetry, false))
+                            .padding([3, 10]),
+                    ]
+                    .align_y(Alignment::Center),
+                    row![
+                        column![
+                            text("SQLite Database File:").size(11).color(theme::COLOR_TEXT),
+                            text(format!("Location: {}", db_path_str)).size(10).color(theme::COLOR_TEXT_MUTED),
+                            text(db_stats_text).size(10).color(theme::COLOR_TEXT_MUTED),
+                        ],
+                        Space::new().width(Fill),
+                        button(text("Open DB Folder").size(11))
+                            .on_press(Message::OpenDatabaseFolder)
+                            .style(theme::clean_button_style(false, false))
+                            .padding([3, 10]),
+                    ]
+                    .align_y(Alignment::Center),
+                    row![
+                        column![
+                            text("Factory Reset All App Data:").size(11).color(theme::COLOR_TEXT),
+                            text("Clears SQLite table and restores all camera settings to factory defaults").size(10).color(theme::COLOR_TEXT_MUTED),
+                        ],
+                        Space::new().width(Fill),
+                        button(text("Factory Reset Database").size(11))
+                            .on_press(Message::ResetFactorySettings)
+                            .style(theme::danger_menu_item_style)
+                            .padding([3, 10]),
+                    ]
+                    .align_y(Alignment::Center),
+                ]
+                .spacing(10)
+                .padding([10, 14]),
+            )
+            .style(theme::settings_inner_box_style)
+            .width(Fill),
+        ]
+        .spacing(6);
+
+        // SECTION 11: Customizable Keyboard Shortcuts Manager
         let shortcuts_section = column![
             row![
-                text("8. Custom Keyboard Shortcuts Manager").size(11).color(theme::COLOR_TEXT_MUTED),
+                text("11. Custom Keyboard Shortcuts Manager").size(11).color(theme::COLOR_TEXT_MUTED),
                 Space::new().width(Fill),
                 button(text("Reset to Defaults").size(10))
                     .on_press(Message::ResetShortcuts)
@@ -3370,10 +3931,13 @@ impl AutoCamApp {
                 dev_section,
                 flicker_section,
                 image_tune_section,
+                profile_section,
                 geom_section,
                 ai_section,
                 denoise_section,
                 vcam_section,
+                storage_section,
+                dev_tools_section,
                 shortcuts_section,
                 bottom_actions,
             ]
@@ -3678,29 +4242,95 @@ fn with_resize_handles<'a>(content: Element<'a, Message>, window_id: window::Id)
     .into()
 }
 
+#[cfg(target_os = "windows")]
+fn show_native_message_box(title_str: &str, msg_str: &str) {
+    use std::ffi::OsStr;
+    use std::os::windows::ffi::OsStrExt;
+    let title: Vec<u16> = OsStr::new(title_str)
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let text: Vec<u16> = OsStr::new(msg_str)
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    #[link(name = "user32")]
+    unsafe extern "system" {
+        fn MessageBoxW(hwnd: usize, lp_text: *const u16, lp_caption: *const u16, u_type: u32) -> i32;
+    }
+    unsafe {
+        MessageBoxW(0, text.as_ptr(), title.as_ptr(), 0x10);
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn setup_crash_protection() {
+    // 1. Rust Panic Hook
+    std::panic::set_hook(Box::new(|info| {
+        let err_text = format!(
+            "AutoCam encountered an unexpected error:\n\n{}\n\nPlease check permissions or hardware access.",
+            info
+        );
+        let _ = std::fs::write("autocam_crash.log", &err_text);
+        show_native_message_box("AutoCam Startup Error", &err_text);
+    }));
+
+    // 2. Windows Vectored Exception Handler (catches native faults like missing delay-load DLLs or CPU illegal instructions)
+    #[repr(C)]
+    struct EXCEPTION_RECORD {
+        exception_code: u32,
+        _exception_flags: u32,
+        _exception_record: *mut EXCEPTION_RECORD,
+        exception_address: *mut std::ffi::c_void,
+        _number_parameters: u32,
+        _exception_information: [usize; 15],
+    }
+
+    #[repr(C)]
+    struct EXCEPTION_POINTERS {
+        exception_record: *mut EXCEPTION_RECORD,
+        _context_record: *mut std::ffi::c_void,
+    }
+
+    unsafe extern "system" fn veh_handler(pointers: *mut EXCEPTION_POINTERS) -> i32 {
+        unsafe {
+            if !pointers.is_null() && !(*pointers).exception_record.is_null() {
+                let code = (*(*pointers).exception_record).exception_code;
+                if code == 0xC0000005 || code == 0xC000001D || code == 0xC06D007E {
+                    let reason = match code {
+                        0xC0000005 => "Access Violation (0xC0000005) - Memory fault",
+                        0xC000001D => "Illegal Instruction (0xC000001D) - CPU instruction set mismatch",
+                        0xC06D007E => "Module Not Found (0xC06D007E) - Missing Windows Media Feature Pack or system DLL",
+                        _ => "Native System Exception",
+                    };
+                    let msg = format!(
+                        "AutoCam Native Error:\n\n{}\n\nAddress: {:?}\n\nIf you are on Windows N or Boot Camp, please install Windows Media Feature Pack.",
+                        reason, (*(*pointers).exception_record).exception_address
+                    );
+                    let _ = std::fs::write("autocam_crash.log", &msg);
+                    show_native_message_box("AutoCam Compatibility Warning", &msg);
+                }
+            }
+        }
+        0 // EXCEPTION_CONTINUE_SEARCH
+    }
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn AddVectoredExceptionHandler(
+            first: u32,
+            handler: unsafe extern "system" fn(*mut EXCEPTION_POINTERS) -> i32,
+        ) -> *mut std::ffi::c_void;
+    }
+
+    unsafe {
+        AddVectoredExceptionHandler(1, veh_handler);
+    }
+}
+
 fn main() -> iced::Result {
     #[cfg(target_os = "windows")]
-    std::panic::set_hook(Box::new(|info| {
-        let err_text = format!("AutoCam encountered an unexpected error:\n\n{}\n\nPlease check permissions or hardware access.", info);
-        let _ = std::fs::write("autocam_crash.log", &err_text);
-        use std::ffi::OsStr;
-        use std::os::windows::ffi::OsStrExt;
-        let title: Vec<u16> = OsStr::new("AutoCam Startup Error")
-            .encode_wide()
-            .chain(std::iter::once(0))
-            .collect();
-        let text: Vec<u16> = OsStr::new(&err_text)
-            .encode_wide()
-            .chain(std::iter::once(0))
-            .collect();
-        #[link(name = "user32")]
-        unsafe extern "system" {
-            fn MessageBoxW(hwnd: usize, lp_text: *const u16, lp_caption: *const u16, u_type: u32) -> i32;
-        }
-        unsafe {
-            MessageBoxW(0, text.as_ptr(), title.as_ptr(), 0x10);
-        }
-    }));
+    setup_crash_protection();
 
     iced::daemon(AutoCamApp::boot, AutoCamApp::update, AutoCamApp::view)
         .subscription(AutoCamApp::subscription)

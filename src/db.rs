@@ -36,23 +36,23 @@ fn open_connection() -> Result<Connection> {
     let path = get_db_path();
     let conn = Connection::open(&path).or_else(|_| Connection::open_in_memory())?;
 
-    // Fast WAL configuration
-    conn.execute_batch(
+    // Fast WAL configuration (safe fallback if filesystem doesn't support WAL)
+    let _ = conn.execute_batch(
         "
         PRAGMA journal_mode = WAL;
         PRAGMA synchronous = NORMAL;
         PRAGMA temp_store = MEMORY;
         PRAGMA busy_timeout = 3000;
         ",
-    )?;
+    );
 
-    conn.execute(
+    let _ = conn.execute(
         "CREATE TABLE IF NOT EXISTS app_settings (
             key TEXT PRIMARY KEY,
             value TEXT NOT NULL
         );",
         [],
-    )?;
+    );
 
     Ok(conn)
 }
@@ -121,6 +121,20 @@ pub fn set_batch(pairs: &[(&str, &str)]) {
     }
 }
 
+
+pub fn reset_factory_defaults() {
+    let _lock = DB_MUTEX.lock().unwrap();
+    if let Ok(conn) = open_connection() {
+        let _ = conn.execute("DELETE FROM app_settings", []);
+    }
+}
+
+pub fn get_db_info() -> (String, u64, usize) {
+    let path = get_db_path();
+    let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+    let count = load_all().len();
+    (path.to_string_lossy().to_string(), size, count)
+}
 
 #[cfg(test)]
 mod tests {

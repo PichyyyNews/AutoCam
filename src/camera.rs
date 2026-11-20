@@ -71,6 +71,25 @@ impl DenoiseMode {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ColorProfile {
+    Neutral,
+    Vivid,
+    CinemaLog,
+    BwMonochrome,
+}
+
+impl ColorProfile {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Neutral => "Neutral",
+            Self::Vivid => "Vivid",
+            Self::CinemaLog => "Cinema Log",
+            Self::BwMonochrome => "B&W",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AntiFlickerMode {
     Off,
     Hz50,
@@ -117,6 +136,9 @@ pub struct ProcessingConfig {
     pub denoise_mode: DenoiseMode,
     pub low_light_boost: bool,
     pub auto_white_balance: bool,
+    pub manual_kelvin: u32,
+    pub iso_gain: f32,
+    pub color_profile: ColorProfile,
 }
 
 impl Default for ProcessingConfig {
@@ -139,9 +161,12 @@ impl Default for ProcessingConfig {
             cas_intensity: 0.45,
             enable_interpolation: false,
             enable_face_detect: false,
-            denoise_mode: DenoiseMode::Low,
+            denoise_mode: DenoiseMode::Off, // Default OFF as requested
             low_light_boost: false,
             auto_white_balance: false,
+            manual_kelvin: 5500,
+            iso_gain: 1.0,
+            color_profile: ColorProfile::Neutral,
         }
     }
 }
@@ -172,6 +197,9 @@ pub enum CameraControl {
     SetDenoiseMode(DenoiseMode),
     SetLowLightBoost(bool),
     SetAutoWhiteBalance(bool),
+    SetManualKelvin(u32),
+    SetIsoGain(f32),
+    SetColorProfile(ColorProfile),
     ResetDefaults,
     Stop,
 }
@@ -181,55 +209,102 @@ pub struct CameraManager {
     is_running: Arc<AtomicBool>,
 }
 
-impl CameraManager {
-    pub fn query_available_devices() -> Vec<CameraDeviceInfo> {
-        let mut list = Vec::new();
-        if let Ok(devices) = nokhwa::query(ApiBackend::Auto) {
-            for (idx, dev) in devices.into_iter().enumerate() {
-                let name = if dev.human_name().is_empty() {
-                    format!("Camera {}", idx)
-                } else {
-                    dev.human_name()
-                };
-                list.push(CameraDeviceInfo {
-                    index: idx as u32,
-                    name,
-                });
+#[cfg(target_os = "windows")]
+pub fn is_media_foundation_available() -> bool {
+    use std::ffi::CString;
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn LoadLibraryA(lpLibFileName: *const i8) -> usize;
+        fn FreeLibrary(hLibModule: usize) -> i32;
+    }
+
+    let dlls = ["mfplat.dll", "mf.dll", "mfreadwrite.dll"];
+    for dll in &dlls {
+        if let Ok(cname) = CString::new(*dll) {
+            unsafe {
+                let handle = LoadLibraryA(cname.as_ptr());
+                if handle == 0 {
+                    return false;
+                }
+                FreeLibrary(handle);
             }
         }
-        list
+    }
+    true
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn is_media_foundation_available() -> bool {
+    true
+}
+
+impl CameraManager {
+    pub fn query_available_devices() -> Vec<CameraDeviceInfo> {
+        #[cfg(target_os = "windows")]
+        if !is_media_foundation_available() {
+            return Vec::new();
+        }
+
+        let res = std::panic::catch_unwind(|| {
+            let mut list = Vec::new();
+            if let Ok(devices) = nokhwa::query(ApiBackend::Auto) {
+                for (idx, dev) in devices.into_iter().enumerate() {
+                    let name = if dev.human_name().is_empty() {
+                        format!("Camera {}", idx)
+                    } else {
+                        dev.human_name()
+                    };
+                    list.push(CameraDeviceInfo {
+                        index: idx as u32,
+                        name,
+                    });
+                }
+            }
+            list
+        });
+
+        res.unwrap_or_default()
     }
 
     /// Queries which resolutions this specific camera hardware supports
     pub fn query_supported_resolutions(device_idx: u32) -> Vec<VideoResolution> {
-        let index = CameraIndex::Index(device_idx);
-        let mut supported = vec![VideoResolution::Hd720p];
+        #[cfg(target_os = "windows")]
+        if !is_media_foundation_available() {
+            return vec![VideoResolution::Hd720p, VideoResolution::Fhd1080p];
+        }
 
-        if let Ok(mut cam) = Camera::new(
-            index,
-            RequestedFormat::new::<RgbAFormat>(RequestedFormatType::AbsoluteHighestFrameRate),
-        ) {
-            if let Ok(formats) = cam.compatible_camera_formats() {
-                let has_1080p = formats.iter().any(|f| {
-                    let r = f.resolution();
-                    r.width() >= 1920 && r.height() >= 1080
-                });
-                if has_1080p {
+        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let index = CameraIndex::Index(device_idx);
+            let mut supported = vec![VideoResolution::Hd720p];
+
+            if let Ok(mut cam) = Camera::new(
+                index,
+                RequestedFormat::new::<RgbAFormat>(RequestedFormatType::None),
+            ) {
+                if let Ok(formats) = cam.compatible_camera_formats() {
+                    let has_1080p = formats.iter().any(|f| {
+                        let r = f.resolution();
+                        r.width() >= 1920 && r.height() >= 1080
+                    });
+                    if has_1080p {
+                        supported.push(VideoResolution::Fhd1080p);
+                    }
+                } else {
                     supported.push(VideoResolution::Fhd1080p);
                 }
             } else {
                 supported.push(VideoResolution::Fhd1080p);
             }
-        } else {
-            supported.push(VideoResolution::Fhd1080p);
-        }
 
-        supported.sort_by_key(|r| match r {
-            VideoResolution::Hd720p => 1,
-            VideoResolution::Fhd1080p => 2,
-        });
-        supported.dedup();
-        supported
+            supported.sort_by_key(|r| match r {
+                VideoResolution::Hd720p => 1,
+                VideoResolution::Fhd1080p => 2,
+            });
+            supported.dedup();
+            supported
+        }));
+
+        res.unwrap_or_else(|_| vec![VideoResolution::Hd720p, VideoResolution::Fhd1080p])
     }
 
     pub fn start(initial_device: u32, initial_res: VideoResolution) -> Self {
@@ -276,34 +351,57 @@ impl Drop for CameraManager {
 }
 
 pub fn open_camera(device_idx: u32, resolution: VideoResolution) -> Option<Camera> {
-    let (w, h) = resolution.dimensions();
-    let index = CameraIndex::Index(device_idx);
+    #[cfg(target_os = "windows")]
+    if !is_media_foundation_available() {
+        return None;
+    }
 
-    // 1. Primary: High-framerate MJPEG @ 60 FPS
-    let requested_mjpeg_60 = RequestedFormat::new::<RgbAFormat>(RequestedFormatType::Closest(
-        CameraFormat::new(Resolution::new(w, h), FrameFormat::MJPEG, 60),
-    ));
+    let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let (w, h) = resolution.dimensions();
+        let index = CameraIndex::Index(device_idx);
 
-    // 2. Secondary: MJPEG @ 30 FPS
-    let requested_mjpeg_30 = RequestedFormat::new::<RgbAFormat>(RequestedFormatType::Closest(
-        CameraFormat::new(Resolution::new(w, h), FrameFormat::MJPEG, 30),
-    ));
+        // 1. Primary: High-framerate MJPEG @ 60 FPS (External UVC cameras)
+        let requested_mjpeg_60 = RequestedFormat::new::<RgbAFormat>(RequestedFormatType::Closest(
+            CameraFormat::new(Resolution::new(w, h), FrameFormat::MJPEG, 60),
+        ));
 
-    // 3. Fallback: NV12 @ 30 FPS
-    let requested_nv12 = RequestedFormat::new::<RgbAFormat>(RequestedFormatType::Closest(
-        CameraFormat::new(Resolution::new(w, h), FrameFormat::NV12, 30),
-    ));
+        // 2. Secondary: MJPEG @ 30 FPS
+        let requested_mjpeg_30 = RequestedFormat::new::<RgbAFormat>(RequestedFormatType::Closest(
+            CameraFormat::new(Resolution::new(w, h), FrameFormat::MJPEG, 30),
+        ));
 
-    let camera_res = Camera::new(index.clone(), requested_mjpeg_60)
-        .or_else(|_| Camera::new(index.clone(), requested_mjpeg_30))
-        .or_else(|_| Camera::new(index, requested_nv12));
+        // 3. Fallback: NV12 @ 30 FPS (Standard PC laptop webcams)
+        let requested_nv12 = RequestedFormat::new::<RgbAFormat>(RequestedFormatType::Closest(
+            CameraFormat::new(Resolution::new(w, h), FrameFormat::NV12, 30),
+        ));
 
-    let mut camera = camera_res.ok()?;
-    camera.open_stream().ok()?;
+        // 4. Fallback: YUYV / YUY2 @ 30 FPS (Apple FaceTime HD Camera on Intel MacBooks / Boot Camp)
+        let requested_yuyv = RequestedFormat::new::<RgbAFormat>(RequestedFormatType::Closest(
+            CameraFormat::new(Resolution::new(w, h), FrameFormat::YUYV, 30),
+        ));
 
-    let _ = camera.set_frame_rate(60).or_else(|_| camera.set_frame_rate(30));
+        // 5. Fallback: Highest Framerate (Any native format)
+        let requested_highest = RequestedFormat::new::<RgbAFormat>(RequestedFormatType::AbsoluteHighestFrameRate);
 
-    Some(camera)
+        // 6. Ultimate Fallback: Default native format (Zero-constraint driver default)
+        let requested_none = RequestedFormat::new::<RgbAFormat>(RequestedFormatType::None);
+
+        let camera_res = Camera::new(index.clone(), requested_mjpeg_60)
+            .or_else(|_| Camera::new(index.clone(), requested_mjpeg_30))
+            .or_else(|_| Camera::new(index.clone(), requested_nv12))
+            .or_else(|_| Camera::new(index.clone(), requested_yuyv))
+            .or_else(|_| Camera::new(index.clone(), requested_highest))
+            .or_else(|_| Camera::new(index, requested_none));
+
+        let mut camera = camera_res.ok()?;
+        camera.open_stream().ok()?;
+
+        let _ = camera.set_frame_rate(60).or_else(|_| camera.set_frame_rate(30));
+
+        Some(camera)
+    }));
+
+    res.unwrap_or(None)
 }
 
 /// Real-time 2-stage camera pipeline:
@@ -476,6 +574,13 @@ fn run_realtime_camera_pipeline(
                                 decode_buf[i + 2] = ((decode_buf[i + 2] as f32 * awb_b_gain) as u32).min(255) as u8;
                             }
                         }
+                    } else if cfg.manual_kelvin != 5500 {
+                        let (kr, kg, kb) = kelvin_to_rgb_gain(cfg.manual_kelvin);
+                        for i in (0..decode_buf.len()).step_by(4) {
+                            decode_buf[i] = ((decode_buf[i] as f32 * kr) as u32).min(255) as u8;
+                            decode_buf[i + 1] = ((decode_buf[i + 1] as f32 * kg) as u32).min(255) as u8;
+                            decode_buf[i + 2] = ((decode_buf[i + 2] as f32 * kb) as u32).min(255) as u8;
+                        }
                     }
 
                     // 1. Calculate Software Auto EV gain
@@ -509,7 +614,7 @@ fn run_realtime_camera_pipeline(
                     } else {
                         smooth_ev_gain = target_gain;
                     }
-                    let ev_multiplier = smooth_ev_gain * 2.0f32.powf(cfg.ev_bias);
+                    let ev_multiplier = smooth_ev_gain * 2.0f32.powf(cfg.ev_bias) * cfg.iso_gain;
 
                     // 2. High-speed process frame (zoom, u32-flip, rotate, LUT, peaking, saturation)
                     let (final_w, final_h, mut final_pixels) = process_frame(
@@ -548,6 +653,43 @@ fn run_realtime_camera_pipeline(
                         );
                         if cfg.denoise_mode == DenoiseMode::Medium || cfg.denoise_mode == DenoiseMode::High {
                             apply_subtle_skin_polish(&mut final_pixels, final_w, final_h);
+                        }
+                    }
+
+                    // 3.2 Picture Profile & Look Emulation
+                    match cfg.color_profile {
+                        ColorProfile::Neutral => {}
+                        ColorProfile::Vivid => {
+                            for i in (0..final_pixels.len()).step_by(4) {
+                                let r = final_pixels[i] as f32;
+                                let g = final_pixels[i + 1] as f32;
+                                let b = final_pixels[i + 2] as f32;
+                                let gray = 0.299 * r + 0.587 * g + 0.114 * b;
+                                final_pixels[i] = (gray + (r - gray) * 1.30).clamp(0.0, 255.0) as u8;
+                                final_pixels[i + 1] = (gray + (g - gray) * 1.30).clamp(0.0, 255.0) as u8;
+                                final_pixels[i + 2] = (gray + (b - gray) * 1.30).clamp(0.0, 255.0) as u8;
+                            }
+                        }
+                        ColorProfile::CinemaLog => {
+                            for i in (0..final_pixels.len()).step_by(4) {
+                                let r = final_pixels[i] as f32;
+                                let g = final_pixels[i + 1] as f32;
+                                let b = final_pixels[i + 2] as f32;
+                                final_pixels[i] = ((r - 128.0) * 0.78 + 128.0).clamp(0.0, 255.0) as u8;
+                                final_pixels[i + 1] = ((g - 128.0) * 0.78 + 128.0).clamp(0.0, 255.0) as u8;
+                                final_pixels[i + 2] = ((b - 128.0) * 0.78 + 128.0).clamp(0.0, 255.0) as u8;
+                            }
+                        }
+                        ColorProfile::BwMonochrome => {
+                            for i in (0..final_pixels.len()).step_by(4) {
+                                let r = final_pixels[i] as u32;
+                                let g = final_pixels[i + 1] as u32;
+                                let b = final_pixels[i + 2] as u32;
+                                let y = ((r * 77 + g * 150 + b * 29) >> 8) as u8;
+                                final_pixels[i] = y;
+                                final_pixels[i + 1] = y;
+                                final_pixels[i + 2] = y;
+                            }
                         }
                     }
 
@@ -637,6 +779,9 @@ fn run_realtime_camera_pipeline(
                 CameraControl::SetDenoiseMode(mode) => c.denoise_mode = mode,
                 CameraControl::SetLowLightBoost(ll) => c.low_light_boost = ll,
                 CameraControl::SetAutoWhiteBalance(awb) => c.auto_white_balance = awb,
+                CameraControl::SetManualKelvin(k) => c.manual_kelvin = k,
+                CameraControl::SetIsoGain(iso) => c.iso_gain = iso,
+                CameraControl::SetColorProfile(cp) => c.color_profile = cp,
                 CameraControl::ResetDefaults => {
                     *c = ProcessingConfig::default();
                 }
@@ -948,4 +1093,31 @@ fn apply_subtle_skin_polish(pixels: &mut [u8], width: u32, height: u32) {
             }
         }
     }
+}
+
+/// Convert color temperature in Kelvin to RGB gains normalized around 5500K
+#[inline]
+pub fn kelvin_to_rgb_gain(kelvin: u32) -> (f32, f32, f32) {
+    let t = (kelvin as f32 / 100.0).clamp(20.0, 90.0);
+    let r = if t <= 66.0 {
+        255.0
+    } else {
+        329.6987 * (t - 60.0).powf(-0.1332)
+    };
+    let g = if t <= 66.0 {
+        99.4708 * t.ln() - 161.1195
+    } else {
+        288.1221 * (t - 60.0).powf(-0.0755)
+    };
+    let b = if t >= 66.0 {
+        255.0
+    } else if t <= 19.0 {
+        0.0
+    } else {
+        138.5177 * (t - 10.0).ln() - 305.0447
+    };
+    let norm_r = (r.clamp(0.0, 255.0) / 255.0) / 1.0;
+    let norm_g = (g.clamp(0.0, 255.0) / 255.0) / 0.98;
+    let norm_b = (b.clamp(0.0, 255.0) / 255.0) / 0.96;
+    (norm_r.clamp(0.5, 1.8), norm_g.clamp(0.5, 1.8), norm_b.clamp(0.5, 1.8))
 }

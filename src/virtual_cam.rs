@@ -90,7 +90,7 @@ fn run_vcam_loop(
             if let Ok(c) = obs_cam {
                 camera = Some(c);
                 current_dim = (w, h);
-            } else {
+            } else if crate::camera::is_media_foundation_available() {
                 // Fallback to Media Foundation on Windows 11
                 let mf_cam = Camera::builder(w, h, 30.0)
                     .format(PixelFormat::RGBA)
@@ -102,6 +102,8 @@ fn run_vcam_loop(
                 } else {
                     camera = None;
                 }
+            } else {
+                camera = None;
             }
         }
 
