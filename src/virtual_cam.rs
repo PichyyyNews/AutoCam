@@ -81,28 +81,51 @@ fn run_vcam_loop(
         };
 
         if camera.is_none() || current_dim != (w, h) {
-            // Attempt OBS backend first (DirectShow Shared Memory)
-            let obs_cam = Camera::builder(w, h, 30.0)
-                .format(PixelFormat::RGBA)
-                .backend(BackendKind::Obs)
-                .build();
-
-            if let Ok(c) = obs_cam {
-                camera = Some(c);
-                current_dim = (w, h);
-            } else if crate::camera::is_media_foundation_available() {
-                // Fallback to Media Foundation on Windows 11
-                let mf_cam = Camera::builder(w, h, 30.0)
+            #[cfg(target_os = "windows")]
+            {
+                // Attempt OBS backend first (DirectShow Shared Memory)
+                let obs_cam = Camera::builder(w, h, 30.0)
                     .format(PixelFormat::RGBA)
-                    .backend(BackendKind::MediaFoundation)
+                    .backend(BackendKind::Obs)
                     .build();
-                if let Ok(c) = mf_cam {
+
+                if let Ok(c) = obs_cam {
+                    camera = Some(c);
+                    current_dim = (w, h);
+                } else if crate::camera::is_media_foundation_available() {
+                    // Fallback to Media Foundation on Windows 11
+                    let mf_cam = Camera::builder(w, h, 30.0)
+                        .format(PixelFormat::RGBA)
+                        .backend(BackendKind::MediaFoundation)
+                        .build();
+                    if let Ok(c) = mf_cam {
+                        camera = Some(c);
+                        current_dim = (w, h);
+                    } else {
+                        camera = None;
+                    }
+                } else {
+                    camera = None;
+                }
+            }
+
+            #[cfg(target_os = "linux")]
+            {
+                // Attempt v4l2loopback device on Linux
+                let v4l2_cam = Camera::builder(w, h, 30.0)
+                    .format(PixelFormat::RGBA)
+                    .backend(BackendKind::V4l2)
+                    .build();
+                if let Ok(c) = v4l2_cam {
                     camera = Some(c);
                     current_dim = (w, h);
                 } else {
                     camera = None;
                 }
-            } else {
+            }
+
+            #[cfg(target_os = "macos")]
+            {
                 camera = None;
             }
         }
@@ -115,22 +138,37 @@ fn run_vcam_loop(
 
 /// Check if virtual camera driver is available on the host machine
 pub fn probe_virtual_cam_availability() -> VirtualCamStatus {
-    if Camera::builder(640, 480, 30.0)
-        .format(PixelFormat::RGBA)
-        .backend(BackendKind::Obs)
-        .build()
-        .is_ok()
+    #[cfg(target_os = "windows")]
     {
-        return VirtualCamStatus::ActiveObs;
+        if Camera::builder(640, 480, 30.0)
+            .format(PixelFormat::RGBA)
+            .backend(BackendKind::Obs)
+            .build()
+            .is_ok()
+        {
+            return VirtualCamStatus::ActiveObs;
+        }
+
+        if Camera::builder(640, 480, 30.0)
+            .format(PixelFormat::RGBA)
+            .backend(BackendKind::MediaFoundation)
+            .build()
+            .is_ok()
+        {
+            return VirtualCamStatus::ActiveMediaFoundation;
+        }
     }
 
-    if Camera::builder(640, 480, 30.0)
-        .format(PixelFormat::RGBA)
-        .backend(BackendKind::MediaFoundation)
-        .build()
-        .is_ok()
+    #[cfg(target_os = "linux")]
     {
-        return VirtualCamStatus::ActiveMediaFoundation;
+        if Camera::builder(640, 480, 30.0)
+            .format(PixelFormat::RGBA)
+            .backend(BackendKind::V4l2)
+            .build()
+            .is_ok()
+        {
+            return VirtualCamStatus::ActiveObs;
+        }
     }
 
     VirtualCamStatus::NotAvailable

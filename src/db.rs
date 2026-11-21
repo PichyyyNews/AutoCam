@@ -16,9 +16,37 @@ fn get_db_path() -> PathBuf {
         }
     }
 
-    // 2. Standard Windows user AppData directory (%APPDATA%\AutoCam\autocam.db)
+    // 2. Platform-specific user data directory
+    #[cfg(target_os = "windows")]
     if let Ok(appdata) = std::env::var("APPDATA") {
         let dir = PathBuf::from(appdata).join("AutoCam");
+        let _ = std::fs::create_dir_all(&dir);
+        let candidate = dir.join("autocam.db");
+        if candidate.exists() || std::fs::OpenOptions::new().write(true).create(true).open(&candidate).is_ok() {
+            return candidate;
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    if let Ok(home) = std::env::var("HOME") {
+        let dir = PathBuf::from(home).join("Library").join("Application Support").join("AutoCam");
+        let _ = std::fs::create_dir_all(&dir);
+        let candidate = dir.join("autocam.db");
+        if candidate.exists() || std::fs::OpenOptions::new().write(true).create(true).open(&candidate).is_ok() {
+            return candidate;
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let data_dir = std::env::var("XDG_DATA_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| {
+                std::env::var("HOME")
+                    .map(|h| PathBuf::from(h).join(".local").join("share"))
+                    .unwrap_or_else(|_| PathBuf::from("/tmp"))
+            });
+        let dir = data_dir.join("autocam");
         let _ = std::fs::create_dir_all(&dir);
         let candidate = dir.join("autocam.db");
         if candidate.exists() || std::fs::OpenOptions::new().write(true).create(true).open(&candidate).is_ok() {

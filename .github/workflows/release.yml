@@ -10,70 +10,37 @@ permissions:
   contents: write
 
 jobs:
-  build-and-release:
-    name: Build (${{ matrix.name }})
-    runs-on: ${{ matrix.os }}
+  build-windows:
+    name: Build Windows (${{ matrix.name }})
+    runs-on: windows-latest
     strategy:
       fail-fast: false
       matrix:
         include:
-          - name: Windows x86_64
-            os: windows-latest
+          - name: x86_64 (64-bit)
             target: x86_64-pc-windows-msvc
             msvc_arch: ''
             binary_name: autocam.exe
             archive_name: autocam-windows-x86_64.zip
             standalone_asset: autocam.exe
 
-          - name: Windows x86 (32-bit)
-            os: windows-latest
+          - name: x86 (32-bit)
             target: i686-pc-windows-msvc
             msvc_arch: 'x86'
             binary_name: autocam.exe
             archive_name: autocam-windows-i686.zip
             standalone_asset: autocam-x86.exe
 
-          - name: Windows ARM64
-            os: windows-latest
+          - name: ARM64
             target: aarch64-pc-windows-msvc
             msvc_arch: 'x64_arm64'
             binary_name: autocam.exe
             archive_name: autocam-windows-arm64.zip
             standalone_asset: autocam-arm64.exe
 
-          - name: macOS Intel (x86_64)
-            os: macos-13
-            target: x86_64-apple-darwin
-            msvc_arch: ''
-            binary_name: autocam
-            archive_name: autocam-macos-x86_64.tar.gz
-            standalone_asset: ''
-
-          - name: macOS Apple Silicon (ARM64)
-            os: macos-14
-            target: aarch64-apple-darwin
-            msvc_arch: ''
-            binary_name: autocam
-            archive_name: autocam-macos-arm64.tar.gz
-            standalone_asset: ''
-
-          - name: Linux x86_64
-            os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-            msvc_arch: ''
-            binary_name: autocam
-            archive_name: autocam-linux-x86_64.tar.gz
-            standalone_asset: ''
-
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-
-      - name: Install Linux system dependencies
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libasound2-dev libudev-dev libv4l-dev libfontconfig1-dev libxkbcommon-dev pkg-config
 
       - name: Setup MSVC environment
         if: matrix.msvc_arch != ''
@@ -89,11 +56,10 @@ jobs:
       - name: Build Release Binary
         run: cargo build --release --target ${{ matrix.target }}
 
-      - name: Package Release (Windows)
-        if: runner.os == 'Windows'
+      - name: Package Release
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force -Path staging
+          New-Item -ItemType Directory -Force -Path staging | Out-Null
           Copy-Item "target/${{ matrix.target }}/release/${{ matrix.binary_name }}" -Destination staging/
           if (Test-Path "README.md") { Copy-Item "README.md" -Destination staging/ }
           Compress-Archive -Path staging/* -DestinationPath "${{ matrix.archive_name }}"
@@ -101,21 +67,111 @@ jobs:
             Copy-Item "target/${{ matrix.target }}/release/${{ matrix.binary_name }}" -Destination "${{ matrix.standalone_asset }}"
           }
 
-      - name: Package Release (Unix)
-        if: runner.os != 'Windows'
-        run: |
-          mkdir -p staging
-          cp "target/${{ matrix.target }}/release/${{ matrix.binary_name }}" staging/
-          chmod +x "staging/${{ matrix.binary_name }}"
-          if [ -f "README.md" ]; then cp "README.md" staging/; fi
-          tar -czvf "${{ matrix.archive_name }}" -C staging .
-
       - name: Publish GitHub Release Assets
         uses: softprops/action-gh-release@v2
         with:
           files: |
             ${{ matrix.archive_name }}
             ${{ matrix.standalone_asset }}
-          generate_release_notes: true
+          generate_release_notes: false
+          draft: false
+          prerelease: false
+
+  build-linux:
+    name: Build Linux (x86_64)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Linux system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libasound2-dev \
+            libudev-dev \
+            libv4l-dev \
+            libfontconfig1-dev \
+            libxkbcommon-dev \
+            libx11-dev \
+            libx11-xcb-dev \
+            libwayland-dev \
+            pkg-config
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu
+
+      - name: Build Release Binary
+        run: cargo build --release --target x86_64-unknown-linux-gnu
+
+      - name: Package Release
+        run: |
+          mkdir -p staging
+          cp target/x86_64-unknown-linux-gnu/release/autocam staging/
+          chmod +x staging/autocam
+          if [ -f "README.md" ]; then cp README.md staging/; fi
+          tar -czvf autocam-linux-x86_64.tar.gz -C staging .
+
+      - name: Publish GitHub Release Assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: autocam-linux-x86_64.tar.gz
+          generate_release_notes: false
+          draft: false
+          prerelease: false
+
+  build-macos:
+    name: Build macOS (Universal, Apple Silicon, Intel)
+    runs-on: macos-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchains for Apple Silicon & Intel
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin, x86_64-apple-darwin
+
+      - name: Build Apple Silicon (aarch64)
+        run: cargo build --release --target aarch64-apple-darwin
+
+      - name: Build Intel Mac (x86_64)
+        run: cargo build --release --target x86_64-apple-darwin
+
+      - name: Package Universal & Arch-Specific macOS Binaries
+        run: |
+          mkdir -p staging/universal staging/arm64 staging/x86_64
+          
+          # Create macOS Universal Binary (runs natively on BOTH Apple Silicon M1-M4 & Intel)
+          lipo -create \
+            -output staging/universal/autocam \
+            target/aarch64-apple-darwin/release/autocam \
+            target/x86_64-apple-darwin/release/autocam
+            
+          cp target/aarch64-apple-darwin/release/autocam staging/arm64/autocam
+          cp target/x86_64-apple-darwin/release/autocam staging/x86_64/autocam
+          
+          chmod +x staging/universal/autocam staging/arm64/autocam staging/x86_64/autocam
+          
+          if [ -f "README.md" ]; then
+            cp README.md staging/universal/
+            cp README.md staging/arm64/
+            cp README.md staging/x86_64/
+          fi
+          
+          tar -czvf autocam-macos-universal.tar.gz -C staging/universal .
+          tar -czvf autocam-macos-arm64.tar.gz -C staging/arm64 .
+          tar -czvf autocam-macos-x86_64.tar.gz -C staging/x86_64 .
+
+      - name: Publish GitHub Release Assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            autocam-macos-universal.tar.gz
+            autocam-macos-arm64.tar.gz
+            autocam-macos-x86_64.tar.gz
+          generate_release_notes: false
           draft: false
           prerelease: false
