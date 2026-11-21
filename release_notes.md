@@ -1,6 +1,11 @@
-### 🚀 AutoCam v0.0.16: Cross-Platform Release & Zero-Crash Resilience
+### 🚀 AutoCam v0.0.17: Complete Cross-Platform Release (Windows, macOS, Linux)
 
-AutoCam v0.0.16 introduces hardened cross-platform support with tested builds for **Windows (x64, x86, ARM64)**, **macOS (Universal, Apple Silicon M1–M4, Intel)**, and **Linux (x86_64 Wayland/X11)**.
+AutoCam v0.0.17 introduces full, verified multi-platform releases across **Windows (x64, x86, ARM64)**, **macOS (Universal Binary for Apple Silicon M1–M4 & Intel)**, and **Linux (x86_64 for Ubuntu, Debian, Fedora, Arch)**.
+
+#### 🔧 What's New & Resolved in v0.0.17:
+- **Linux Release Asset**: Resolved the Linux `Task` clipboard typing constraint and enabled full X11 and Wayland display backends.
+- **macOS Universal Package**: Includes single unified binary supporting 100% of Macs (Apple Silicon + Intel).
+- **Hardened SQLite & File Management**: Seamless cross-platform paths for AppData, macOS Application Support, and Linux XDG Data Home.
 
 ---
 

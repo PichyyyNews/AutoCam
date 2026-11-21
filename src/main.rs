@@ -1004,21 +1004,35 @@ impl AutoCamApp {
             Message::CopyMedia(path) => {
                 let path_str = path.to_string_lossy().to_string();
                 self.active_media_menu_idx = None;
-                #[cfg(target_os = "windows")]
-                let _ = std::process::Command::new("powershell")
-                    .args(["-NoProfile", "-Command", &format!("Set-Clipboard -Path '{}'", path_str.replace('\'', "''"))])
-                    .spawn();
-                #[cfg(target_os = "macos")]
-                let _ = std::process::Command::new("osascript")
-                    .args(["-e", &format!("set the clipboard to (POSIX file \"{}\")", path_str)])
-                    .spawn();
-                #[cfg(not(any(target_os = "windows", target_os = "macos")))]
-                let _ = iced::clipboard::write(path_str);
                 self.snapshot_toast = Some(("Media copied to clipboard".to_string(), Instant::now()));
-                Task::perform(
+                let toast_task = Task::perform(
                     tokio::time::sleep(Duration::from_secs(2)),
                     |_| Message::ClearSnapshotToast,
-                )
+                );
+
+                #[cfg(target_os = "windows")]
+                {
+                    let _ = std::process::Command::new("powershell")
+                        .args(["-NoProfile", "-Command", &format!("Set-Clipboard -Path '{}'", path_str.replace('\'', "''"))])
+                        .spawn();
+                    toast_task
+                }
+
+                #[cfg(target_os = "macos")]
+                {
+                    let _ = std::process::Command::new("osascript")
+                        .args(["-e", &format!("set the clipboard to (POSIX file \"{}\")", path_str)])
+                        .spawn();
+                    toast_task
+                }
+
+                #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+                {
+                    Task::batch([
+                        iced::clipboard::write(path_str),
+                        toast_task,
+                    ])
+                }
             }
 
             Message::DeleteMedia(path) => {
@@ -3624,8 +3638,8 @@ impl AutoCamApp {
                         row![
                             text(format!("CAS Intensity: {:.2}", self.cas_intensity)).size(11).color(theme::COLOR_TEXT),
                             Space::new().width(Fill),
-                            slider(0.0..=1.0, self.cas_intensity, Message::SetCasIntensity)
-                                .step(0.05)
+                            slider(0.0..=1.0f32, self.cas_intensity, Message::SetCasIntensity)
+                                .step(0.05f32)
                                 .style(theme::clean_slider_style)
                                 .width(Length::Fixed(200.0)),
                         ]

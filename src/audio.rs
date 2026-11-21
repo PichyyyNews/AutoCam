@@ -12,6 +12,7 @@ impl std::fmt::Display for AudioDeviceInfo {
 
 pub fn query_audio_input_devices() -> Vec<AudioDeviceInfo> {
     let result = std::panic::catch_unwind(|| {
+        #[allow(unused_mut)]
         let mut devices = Vec::new();
 
         #[cfg(target_os = "windows")]
