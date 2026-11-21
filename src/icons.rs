@@ -204,3 +204,48 @@ pub const ICON_MIC_OFF: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBo
   <path d="M9 9v3a3 3 0 0 0 5.12 2.12"/>
   <line x1="12" x2="12" y1="19" y2="22"/>
 </svg>"#;
+
+
+pub const ICON_PALETTE: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+  <circle cx="13.5" cy="6.5" r=".5" fill="currentColor"/>
+  <circle cx="17.5" cy="10.5" r=".5" fill="currentColor"/>
+  <circle cx="8.5" cy="7.5" r=".5" fill="currentColor"/>
+  <circle cx="6.5" cy="12.5" r=".5" fill="currentColor"/>
+  <path d="M12 2C6.5 2 2 6.5 2 12s4.5 10 10 10c.926 0 1.648-.746 1.648-1.688 0-.437-.18-.835-.437-1.125-.29-.289-.438-.652-.438-1.125a1.64 1.64 0 0 1 1.668-1.668h1.996c3.051 0 5.555-2.503 5.555-5.554C21.965 6.012 17.461 2 12 2z"/>
+</svg>"#;
+
+pub const ICON_LAYOUT: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+  <rect width="18" height="18" x="3" y="3" rx="2"/>
+  <path d="M3 9h18"/>
+  <path d="M9 21V9"/>
+</svg>"#;
+
+pub const ICON_KEYBOARD: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+  <rect width="20" height="16" x="2" y="4" rx="2"/>
+  <path d="M6 8h.001"/>
+  <path d="M10 8h.001"/>
+  <path d="M14 8h.001"/>
+  <path d="M18 8h.001"/>
+  <path d="M8 12h.001"/>
+  <path d="M12 12h.001"/>
+  <path d="M16 12h.001"/>
+  <path d="M7 16h10"/>
+</svg>"#;
+
+pub const ICON_BELL: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/>
+  <path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/>
+</svg>"#;
+
+pub const ICON_HARDDRIVE: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+  <line x1="22" x2="2" y1="12" y2="12"/>
+  <path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/>
+  <line x1="6" x2="6.01" y1="16" y2="16"/>
+  <line x1="10" x2="10.01" y1="16" y2="16"/>
+</svg>"#;
+
+pub const ICON_INFO: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+  <circle cx="12" cy="12" r="10"/>
+  <path d="M12 16v-4"/>
+  <path d="M12 8h.01"/>
+</svg>"#;

@@ -268,6 +268,108 @@ pub struct ViewerVideoState {
     pub is_playing: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettingsTab {
+    General,
+    Application,
+    Appearance,
+    Shortcuts,
+    Notifications,
+    Storage,
+    About,
+}
+
+impl SettingsTab {
+    pub fn label(&self) -> &'static str {
+        match self {
+            SettingsTab::General => "General",
+            SettingsTab::Application => "Application",
+            SettingsTab::Appearance => "Appearance",
+            SettingsTab::Shortcuts => "Shortcuts",
+            SettingsTab::Notifications => "Notifications",
+            SettingsTab::Storage => "Storage & Data",
+            SettingsTab::About => "About",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CameraSettingsMode {
+    Basic,
+    Advance,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolbarButtonKind {
+    Snapshot,
+    Record,
+    Flip,
+    Freeze,
+    Rotate,
+    Zoom,
+    Focus,
+    Ev,
+    Grid,
+    FaceHud,
+    Fullscreen,
+    AlbumStrip,
+    Settings,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolbarVisibility {
+    pub show_snapshot: bool,
+    pub show_record: bool,
+    pub show_flip: bool,
+    pub show_freeze: bool,
+    pub show_rotate: bool,
+    pub show_zoom: bool,
+    pub show_focus: bool,
+    pub show_ev: bool,
+    pub show_grid: bool,
+    pub show_face_hud: bool,
+    pub show_fullscreen: bool,
+    pub show_album_strip: bool,
+    pub show_settings: bool,
+}
+
+impl Default for ToolbarVisibility {
+    fn default() -> Self {
+        Self {
+            show_snapshot: true,
+            show_record: true,
+            show_flip: true,
+            show_freeze: true,
+            show_rotate: true,
+            show_zoom: true,
+            show_focus: true,
+            show_ev: true,
+            show_grid: true,
+            show_face_hud: true,
+            show_fullscreen: true,
+            show_album_strip: true,
+            show_settings: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NotificationConfig {
+    pub enable_toast: bool,
+    pub toast_duration_secs: u64,
+    pub shutter_sound: bool,
+}
+
+impl Default for NotificationConfig {
+    fn default() -> Self {
+        Self {
+            enable_toast: true,
+            toast_duration_secs: 2,
+            shutter_sound: true,
+        }
+    }
+}
+
 pub struct AutoCamApp {
     main_window_id: Option<window::Id>,
     settings_window_id: Option<window::Id>,
@@ -366,6 +468,17 @@ pub struct AutoCamApp {
     // PiP state
     is_pip: bool,
     pip_hovered: bool,
+
+    // Settings Navigation & Customization
+    settings_tab: SettingsTab,
+    camera_settings_mode: CameraSettingsMode,
+    toolbar_visibility: ToolbarVisibility,
+    theme_mode: theme::AppThemeMode,
+    accent_color: theme::AccentColor,
+    ui_scale: theme::UiFontScale,
+    notification_config: NotificationConfig,
+    always_on_top: bool,
+    keep_aspect_ratio: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -474,6 +587,25 @@ pub enum Message {
     StartRebinding(ShortcutAction),
     CancelRebinding,
     ResetShortcuts,
+
+    // Settings Tabs & Categories
+    SetSettingsTab(SettingsTab),
+    SetCameraSettingsMode(CameraSettingsMode),
+
+    // Appearance & Theme Messages
+    SetThemeMode(theme::AppThemeMode),
+    SetAccentColor(theme::AccentColor),
+    SetUiScale(theme::UiFontScale),
+
+    // Toolbar & View Controls Messages
+    ToggleToolbarButton(ToolbarButtonKind),
+    ToggleAlwaysOnTop,
+    ToggleKeepAspectRatio,
+
+    // Notification & Feedback Messages
+    ToggleToastEnabled,
+    SetToastDuration(u64),
+    ToggleShutterSound,
 }
 
 fn camera_frame_stream() -> impl iced::futures::Stream<Item = Message> {
@@ -644,6 +776,72 @@ impl AutoCamApp {
         };
         let is_mic_muted = db_cfg.get("is_mic_muted").map(|v| v == "true").unwrap_or(false);
 
+        let settings_tab = match db_cfg.get("settings_tab").map(|s| s.as_str()) {
+            Some("Application") => SettingsTab::Application,
+            Some("Appearance") => SettingsTab::Appearance,
+            Some("Shortcuts") => SettingsTab::Shortcuts,
+            Some("Notifications") => SettingsTab::Notifications,
+            Some("Storage") => SettingsTab::Storage,
+            Some("About") => SettingsTab::About,
+            _ => SettingsTab::General,
+        };
+
+        let camera_settings_mode = match db_cfg.get("camera_settings_mode").map(|s| s.as_str()) {
+            Some("Advance") => CameraSettingsMode::Advance,
+            _ => CameraSettingsMode::Basic,
+        };
+
+        let theme_mode = match db_cfg.get("theme_mode").map(|s| s.as_str()) {
+            Some("Light") => theme::AppThemeMode::Light,
+            Some("System") => theme::AppThemeMode::System,
+            _ => theme::AppThemeMode::Dark,
+        };
+
+        let accent_color = match db_cfg.get("accent_color").map(|s| s.as_str()) {
+            Some("Blue") => theme::AccentColor::Blue,
+            Some("Emerald") => theme::AccentColor::Emerald,
+            Some("Amber") => theme::AccentColor::Amber,
+            Some("Rose") => theme::AccentColor::Rose,
+            Some("Violet") => theme::AccentColor::Violet,
+            Some("Cyan") => theme::AccentColor::Cyan,
+            _ => theme::AccentColor::Zinc,
+        };
+
+        let ui_scale = match db_cfg.get("ui_scale").map(|s| s.as_str()) {
+            Some("Compact") => theme::UiFontScale::Compact,
+            Some("Large") => theme::UiFontScale::Large,
+            _ => theme::UiFontScale::Normal,
+        };
+
+        theme::set_theme_mode(theme_mode);
+        theme::set_accent_color(accent_color);
+        theme::set_font_scale(ui_scale);
+
+        let toolbar_visibility = ToolbarVisibility {
+            show_snapshot: db_cfg.get("show_btn_snapshot").map(|v| v == "true").unwrap_or(true),
+            show_record: db_cfg.get("show_btn_record").map(|v| v == "true").unwrap_or(true),
+            show_flip: db_cfg.get("show_btn_flip").map(|v| v == "true").unwrap_or(true),
+            show_freeze: db_cfg.get("show_btn_freeze").map(|v| v == "true").unwrap_or(true),
+            show_rotate: db_cfg.get("show_btn_rotate").map(|v| v == "true").unwrap_or(true),
+            show_zoom: db_cfg.get("show_btn_zoom").map(|v| v == "true").unwrap_or(true),
+            show_focus: db_cfg.get("show_btn_focus").map(|v| v == "true").unwrap_or(true),
+            show_ev: db_cfg.get("show_btn_ev").map(|v| v == "true").unwrap_or(true),
+            show_grid: db_cfg.get("show_btn_grid").map(|v| v == "true").unwrap_or(true),
+            show_face_hud: db_cfg.get("show_btn_face_hud").map(|v| v == "true").unwrap_or(true),
+            show_fullscreen: db_cfg.get("show_btn_fullscreen").map(|v| v == "true").unwrap_or(true),
+            show_album_strip: db_cfg.get("show_btn_album_strip").map(|v| v == "true").unwrap_or(true),
+            show_settings: db_cfg.get("show_btn_settings").map(|v| v == "true").unwrap_or(true),
+        };
+
+        let notification_config = NotificationConfig {
+            enable_toast: db_cfg.get("enable_toast").map(|v| v == "true").unwrap_or(true),
+            toast_duration_secs: db_cfg.get("toast_duration_secs").and_then(|v| v.parse().ok()).unwrap_or(2),
+            shutter_sound: db_cfg.get("shutter_sound").map(|v| v == "true").unwrap_or(true),
+        };
+
+        let always_on_top = db_cfg.get("always_on_top").map(|v| v == "true").unwrap_or(false);
+        let keep_aspect_ratio = db_cfg.get("keep_aspect_ratio").map(|v| v == "true").unwrap_or(false);
+
         let app = Self {
             main_window_id: Some(main_id),
             settings_window_id: None,
@@ -740,6 +938,16 @@ impl AutoCamApp {
 
             is_pip: false,
             pip_hovered: false,
+
+            settings_tab,
+            camera_settings_mode,
+            toolbar_visibility,
+            theme_mode,
+            accent_color,
+            ui_scale,
+            notification_config,
+            always_on_top,
+            keep_aspect_ratio,
         };
 
         (app, open_task.map(Message::MainWindowOpened))
@@ -767,7 +975,11 @@ impl AutoCamApp {
     }
 
     pub fn theme(&self, _window_id: window::Id) -> iced::Theme {
-        iced::Theme::Dark
+        match self.theme_mode {
+            theme::AppThemeMode::Dark => iced::Theme::Dark,
+            theme::AppThemeMode::Light => iced::Theme::Light,
+            theme::AppThemeMode::System => iced::Theme::Dark,
+        }
     }
 
     pub fn refresh_media_items(&mut self) {
@@ -805,8 +1017,8 @@ impl AutoCamApp {
                         icon: window::icon::from_file_data(APP_ICON_BYTES, None).ok(),
                         decorations: false,
                         transparent: false,
-                        size: iced::Size::new(540.0, 780.0),
-                        min_size: Some(iced::Size::new(480.0, 500.0)),
+                        size: iced::Size::new(860.0, 620.0),
+                        min_size: Some(iced::Size::new(720.0, 520.0)),
                         resizable: true,
                         ..Default::default()
                     });
@@ -1980,6 +2192,159 @@ impl AutoCamApp {
                 }
                 Task::none()
             }
+
+            Message::SetSettingsTab(tab) => {
+                self.settings_tab = tab;
+                db::set("settings_tab", match tab {
+                    SettingsTab::General => "General",
+                    SettingsTab::Application => "Application",
+                    SettingsTab::Appearance => "Appearance",
+                    SettingsTab::Shortcuts => "Shortcuts",
+                    SettingsTab::Notifications => "Notifications",
+                    SettingsTab::Storage => "Storage",
+                    SettingsTab::About => "About",
+                });
+                Task::none()
+            }
+
+            Message::SetCameraSettingsMode(mode) => {
+                self.camera_settings_mode = mode;
+                db::set("camera_settings_mode", match mode {
+                    CameraSettingsMode::Basic => "Basic",
+                    CameraSettingsMode::Advance => "Advance",
+                });
+                Task::none()
+            }
+
+            Message::SetThemeMode(mode) => {
+                self.theme_mode = mode;
+                theme::set_theme_mode(mode);
+                db::set("theme_mode", match mode {
+                    theme::AppThemeMode::Dark => "Dark",
+                    theme::AppThemeMode::Light => "Light",
+                    theme::AppThemeMode::System => "System",
+                });
+                Task::none()
+            }
+
+            Message::SetAccentColor(acc) => {
+                self.accent_color = acc;
+                theme::set_accent_color(acc);
+                db::set("accent_color", match acc {
+                    theme::AccentColor::Zinc => "Zinc",
+                    theme::AccentColor::Blue => "Blue",
+                    theme::AccentColor::Emerald => "Emerald",
+                    theme::AccentColor::Amber => "Amber",
+                    theme::AccentColor::Rose => "Rose",
+                    theme::AccentColor::Violet => "Violet",
+                    theme::AccentColor::Cyan => "Cyan",
+                });
+                Task::none()
+            }
+
+            Message::SetUiScale(scale) => {
+                self.ui_scale = scale;
+                theme::set_font_scale(scale);
+                db::set("ui_scale", match scale {
+                    theme::UiFontScale::Compact => "Compact",
+                    theme::UiFontScale::Normal => "Normal",
+                    theme::UiFontScale::Large => "Large",
+                });
+                Task::none()
+            }
+
+            Message::ToggleToolbarButton(kind) => {
+                match kind {
+                    ToolbarButtonKind::Snapshot => {
+                        self.toolbar_visibility.show_snapshot = !self.toolbar_visibility.show_snapshot;
+                        db::set("show_btn_snapshot", if self.toolbar_visibility.show_snapshot { "true" } else { "false" });
+                    }
+                    ToolbarButtonKind::Record => {
+                        self.toolbar_visibility.show_record = !self.toolbar_visibility.show_record;
+                        db::set("show_btn_record", if self.toolbar_visibility.show_record { "true" } else { "false" });
+                    }
+                    ToolbarButtonKind::Flip => {
+                        self.toolbar_visibility.show_flip = !self.toolbar_visibility.show_flip;
+                        db::set("show_btn_flip", if self.toolbar_visibility.show_flip { "true" } else { "false" });
+                    }
+                    ToolbarButtonKind::Freeze => {
+                        self.toolbar_visibility.show_freeze = !self.toolbar_visibility.show_freeze;
+                        db::set("show_btn_freeze", if self.toolbar_visibility.show_freeze { "true" } else { "false" });
+                    }
+                    ToolbarButtonKind::Rotate => {
+                        self.toolbar_visibility.show_rotate = !self.toolbar_visibility.show_rotate;
+                        db::set("show_btn_rotate", if self.toolbar_visibility.show_rotate { "true" } else { "false" });
+                    }
+                    ToolbarButtonKind::Zoom => {
+                        self.toolbar_visibility.show_zoom = !self.toolbar_visibility.show_zoom;
+                        db::set("show_btn_zoom", if self.toolbar_visibility.show_zoom { "true" } else { "false" });
+                    }
+                    ToolbarButtonKind::Focus => {
+                        self.toolbar_visibility.show_focus = !self.toolbar_visibility.show_focus;
+                        db::set("show_btn_focus", if self.toolbar_visibility.show_focus { "true" } else { "false" });
+                    }
+                    ToolbarButtonKind::Ev => {
+                        self.toolbar_visibility.show_ev = !self.toolbar_visibility.show_ev;
+                        db::set("show_btn_ev", if self.toolbar_visibility.show_ev { "true" } else { "false" });
+                    }
+                    ToolbarButtonKind::Grid => {
+                        self.toolbar_visibility.show_grid = !self.toolbar_visibility.show_grid;
+                        db::set("show_btn_grid", if self.toolbar_visibility.show_grid { "true" } else { "false" });
+                    }
+                    ToolbarButtonKind::FaceHud => {
+                        self.toolbar_visibility.show_face_hud = !self.toolbar_visibility.show_face_hud;
+                        db::set("show_btn_face_hud", if self.toolbar_visibility.show_face_hud { "true" } else { "false" });
+                    }
+                    ToolbarButtonKind::Fullscreen => {
+                        self.toolbar_visibility.show_fullscreen = !self.toolbar_visibility.show_fullscreen;
+                        db::set("show_btn_fullscreen", if self.toolbar_visibility.show_fullscreen { "true" } else { "false" });
+                    }
+                    ToolbarButtonKind::AlbumStrip => {
+                        self.toolbar_visibility.show_album_strip = !self.toolbar_visibility.show_album_strip;
+                        db::set("show_btn_album_strip", if self.toolbar_visibility.show_album_strip { "true" } else { "false" });
+                    }
+                    ToolbarButtonKind::Settings => {
+                        self.toolbar_visibility.show_settings = !self.toolbar_visibility.show_settings;
+                        db::set("show_btn_settings", if self.toolbar_visibility.show_settings { "true" } else { "false" });
+                    }
+                }
+                Task::none()
+            }
+
+            Message::ToggleAlwaysOnTop => {
+                self.always_on_top = !self.always_on_top;
+                db::set("always_on_top", if self.always_on_top { "true" } else { "false" });
+                if let Some(id) = self.main_window_id {
+                    let level = if self.always_on_top { window::Level::AlwaysOnTop } else { window::Level::Normal };
+                    window::set_level(id, level)
+                } else {
+                    Task::none()
+                }
+            }
+
+            Message::ToggleKeepAspectRatio => {
+                self.keep_aspect_ratio = !self.keep_aspect_ratio;
+                db::set("keep_aspect_ratio", if self.keep_aspect_ratio { "true" } else { "false" });
+                Task::none()
+            }
+
+            Message::ToggleToastEnabled => {
+                self.notification_config.enable_toast = !self.notification_config.enable_toast;
+                db::set("enable_toast", if self.notification_config.enable_toast { "true" } else { "false" });
+                Task::none()
+            }
+
+            Message::SetToastDuration(secs) => {
+                self.notification_config.toast_duration_secs = secs;
+                db::set("toast_duration_secs", &secs.to_string());
+                Task::none()
+            }
+
+            Message::ToggleShutterSound => {
+                self.notification_config.shutter_sound = !self.notification_config.shutter_sound;
+                db::set("shutter_sound", if self.notification_config.shutter_sound { "true" } else { "false" });
+                Task::none()
+            }
         }
     }
 
@@ -2483,65 +2848,77 @@ impl AutoCamApp {
         )
         .into();
 
-        let toolbar = container(
-            row![
-                // Group 1: Media Capture (Record Video & Still Snapshot)
-                record_btn,
-                render_icon_btn(
-                    icons::ICON_CAMERA,
-                    "Take Snapshot [C]",
-                    Message::CaptureSnapshot,
-                    false,
-                    false,
-                    tooltip::Position::Top,
-                ),
-                toolbar_divider(),
+        let mut toolbar_items: Vec<Element<'_, Message>> = Vec::new();
 
-                // Group 2: Camera Stream & Orientation
-                render_icon_btn(
-                    icons::ICON_FLIP,
-                    "Mirror / Flip [F]",
-                    Message::ToggleFlip,
-                    self.is_flip,
-                    false,
-                    tooltip::Position::Top,
-                ),
-                render_icon_btn(
-                    if self.is_frozen {
-                        icons::ICON_PLAY
-                    } else {
-                        icons::ICON_PAUSE
-                    },
-                    if self.is_frozen {
-                        "Resume Live [Space]"
-                    } else {
-                        "Freeze Frame [Space]"
-                    },
-                    Message::ToggleFreeze,
-                    self.is_frozen,
-                    false,
-                    tooltip::Position::Top,
-                ),
-                tooltip(
-                    button(
-                        row![
-                            render_svg(icons::ICON_ROTATE, 15.0, self.rotation_deg > 0, false),
-                            text(format!("{}°", self.rotation_deg)).size(11),
-                        ]
-                        .spacing(4)
-                        .align_y(Alignment::Center),
-                    )
-                    .on_press(Message::RotateNext)
-                    .style(theme::clean_button_style(self.rotation_deg > 0, false))
-                    .padding([5, 8]),
-                    container(text("Rotate 90° [R]").size(11))
-                        .padding([3, 7])
-                        .style(theme::tooltip_style),
-                    tooltip::Position::Top,
-                ),
-                toolbar_divider(),
+        // Group 1: Media Capture
+        if self.toolbar_visibility.show_record {
+            toolbar_items.push(record_btn);
+        }
+        if self.toolbar_visibility.show_snapshot {
+            toolbar_items.push(render_icon_btn(
+                icons::ICON_CAMERA,
+                "Take Snapshot [C]",
+                Message::CaptureSnapshot,
+                false,
+                false,
+                tooltip::Position::Top,
+            ));
+        }
+        if (self.toolbar_visibility.show_record || self.toolbar_visibility.show_snapshot)
+            && (self.toolbar_visibility.show_flip || self.toolbar_visibility.show_freeze || self.toolbar_visibility.show_rotate)
+        {
+            toolbar_items.push(toolbar_divider());
+        }
 
-                // Group 3: Optics, Zoom & Exposure
+        // Group 2: Camera Stream & Orientation
+        if self.toolbar_visibility.show_flip {
+            toolbar_items.push(render_icon_btn(
+                icons::ICON_FLIP,
+                "Mirror / Flip [F]",
+                Message::ToggleFlip,
+                self.is_flip,
+                false,
+                tooltip::Position::Top,
+            ));
+        }
+        if self.toolbar_visibility.show_freeze {
+            toolbar_items.push(render_icon_btn(
+                if self.is_frozen { icons::ICON_PLAY } else { icons::ICON_PAUSE },
+                if self.is_frozen { "Resume Live [Space]" } else { "Freeze Frame [Space]" },
+                Message::ToggleFreeze,
+                self.is_frozen,
+                false,
+                tooltip::Position::Top,
+            ));
+        }
+        if self.toolbar_visibility.show_rotate {
+            toolbar_items.push(tooltip(
+                button(
+                    row![
+                        render_svg(icons::ICON_ROTATE, 15.0, self.rotation_deg > 0, false),
+                        text(format!("{}°", self.rotation_deg)).size(11),
+                    ]
+                    .spacing(4)
+                    .align_y(Alignment::Center),
+                )
+                .on_press(Message::RotateNext)
+                .style(theme::clean_button_style(self.rotation_deg > 0, false))
+                .padding([5, 8]),
+                container(text("Rotate 90° [R]").size(11))
+                    .padding([3, 7])
+                    .style(theme::tooltip_style),
+                tooltip::Position::Top,
+            ).into());
+        }
+        if (self.toolbar_visibility.show_flip || self.toolbar_visibility.show_freeze || self.toolbar_visibility.show_rotate)
+            && (self.toolbar_visibility.show_zoom || self.toolbar_visibility.show_focus || self.toolbar_visibility.show_ev)
+        {
+            toolbar_items.push(toolbar_divider());
+        }
+
+        // Group 3: Optics, Zoom & Exposure
+        if self.toolbar_visibility.show_zoom {
+            toolbar_items.push(
                 row![
                     render_icon_btn(
                         icons::ICON_ZOOM_OUT,
@@ -2553,7 +2930,7 @@ impl AutoCamApp {
                     ),
                     text(format!("{:.1}x", self.zoom_level))
                         .size(11)
-                        .color(theme::COLOR_TEXT),
+                        .color(theme::color_text()),
                     render_icon_btn(
                         icons::ICON_ZOOM_IN,
                         "Zoom In [=]",
@@ -2564,91 +2941,100 @@ impl AutoCamApp {
                     ),
                 ]
                 .spacing(3)
-                .align_y(Alignment::Center),
-                render_icon_btn(
-                    icons::ICON_FOCUS,
-                    if self.auto_focus {
-                        "Auto Focus: ON [A]"
-                    } else {
-                        "Auto Focus: OFF [A]"
-                    },
-                    Message::ToggleAutoFocus,
-                    self.auto_focus,
-                    false,
-                    tooltip::Position::Top,
-                ),
-                render_icon_btn(
-                    icons::ICON_EV,
-                    if self.auto_ev {
-                        "Auto EV: ON [E]"
-                    } else {
-                        "Auto EV: OFF [E]"
-                    },
-                    Message::ToggleAutoEv,
-                    self.auto_ev,
-                    false,
-                    tooltip::Position::Top,
-                ),
-                toolbar_divider(),
+                .align_y(Alignment::Center)
+                .into()
+            );
+        }
+        if self.toolbar_visibility.show_focus {
+            toolbar_items.push(render_icon_btn(
+                icons::ICON_FOCUS,
+                if self.auto_focus { "Auto Focus: ON [A]" } else { "Auto Focus: OFF [A]" },
+                Message::ToggleAutoFocus,
+                self.auto_focus,
+                false,
+                tooltip::Position::Top,
+            ));
+        }
+        if self.toolbar_visibility.show_ev {
+            toolbar_items.push(render_icon_btn(
+                icons::ICON_EV,
+                if self.auto_ev { "Auto EV: ON [E]" } else { "Auto EV: OFF [E]" },
+                Message::ToggleAutoEv,
+                self.auto_ev,
+                false,
+                tooltip::Position::Top,
+            ));
+        }
+        if (self.toolbar_visibility.show_zoom || self.toolbar_visibility.show_focus || self.toolbar_visibility.show_ev)
+            && (self.toolbar_visibility.show_grid || self.toolbar_visibility.show_face_hud)
+        {
+            toolbar_items.push(toolbar_divider());
+        }
 
-                // Group 4: Overlays & AI Tracking
-                render_icon_btn(
-                    icons::ICON_GRID,
-                    self.grid_mode.label(),
-                    Message::CycleGridMode,
-                    self.grid_mode != GridMode::Off,
-                    false,
-                    tooltip::Position::Top,
-                ),
-                render_icon_btn(
-                    icons::ICON_FACE,
-                    if self.face_detection {
-                        "Face HUD: Active [D]"
-                    } else {
-                        "Face HUD: Off [D]"
-                    },
-                    Message::ToggleFaceDetection,
-                    self.face_detection,
-                    false,
-                    tooltip::Position::Top,
-                ),
-                toolbar_divider(),
+        // Group 4: Overlays & AI Tracking
+        if self.toolbar_visibility.show_grid {
+            toolbar_items.push(render_icon_btn(
+                icons::ICON_GRID,
+                self.grid_mode.label(),
+                Message::CycleGridMode,
+                self.grid_mode != GridMode::Off,
+                false,
+                tooltip::Position::Top,
+            ));
+        }
+        if self.toolbar_visibility.show_face_hud {
+            toolbar_items.push(render_icon_btn(
+                icons::ICON_FACE,
+                if self.face_detection { "Face HUD: Active [D]" } else { "Face HUD: Off [D]" },
+                Message::ToggleFaceDetection,
+                self.face_detection,
+                false,
+                tooltip::Position::Top,
+            ));
+        }
+        if (self.toolbar_visibility.show_grid || self.toolbar_visibility.show_face_hud)
+            && self.toolbar_visibility.show_fullscreen
+        {
+            toolbar_items.push(toolbar_divider());
+        }
 
-                // Group 5: View Mode
-                render_icon_btn(
-                    if self.is_fullscreen {
-                        icons::ICON_MINIMIZE_2
-                    } else {
-                        icons::ICON_MAXIMIZE
-                    },
-                    if self.is_fullscreen {
-                        "Exit Fullscreen [F11]"
-                    } else {
-                        "Fullscreen [F11]"
-                    },
-                    Message::ToggleFullscreen,
-                    self.is_fullscreen,
-                    false,
-                    tooltip::Position::Top,
-                ),
+        // Group 5: View Mode
+        if self.toolbar_visibility.show_fullscreen {
+            toolbar_items.push(render_icon_btn(
+                if self.is_fullscreen { icons::ICON_MINIMIZE_2 } else { icons::ICON_MAXIMIZE },
+                if self.is_fullscreen { "Exit Fullscreen [F11]" } else { "Fullscreen [F11]" },
+                Message::ToggleFullscreen,
+                self.is_fullscreen,
+                false,
+                tooltip::Position::Top,
+            ));
+        }
 
-                Space::new().width(Fill),
+        toolbar_items.push(Space::new().width(Fill).into());
 
-                // Group 6: Gallery & Settings
-                album_btn,
-                toolbar_divider(),
-                render_icon_btn(
-                    icons::ICON_SETTINGS,
-                    "Camera Engine & Driver Settings [S]",
-                    Message::ToggleSettings,
-                    self.settings_window_id.is_some(),
-                    false,
-                    tooltip::Position::Top,
-                ),
-            ]
-            .spacing(6)
-            .align_y(Alignment::Center)
-            .padding([5, 10]),
+        // Group 6: Gallery & Settings
+        if self.toolbar_visibility.show_album_strip {
+            toolbar_items.push(album_btn);
+        }
+        if self.toolbar_visibility.show_album_strip && self.toolbar_visibility.show_settings {
+            toolbar_items.push(toolbar_divider());
+        }
+        if self.toolbar_visibility.show_settings {
+            toolbar_items.push(render_icon_btn(
+                icons::ICON_SETTINGS,
+                "Camera Engine & Driver Settings [S]",
+                Message::ToggleSettings,
+                self.settings_window_id.is_some(),
+                false,
+                tooltip::Position::Top,
+            ));
+        }
+
+        let toolbar = container(
+            row(toolbar_items)
+                .spacing(6)
+                .align_y(Alignment::Center)
+                .padding([5, 10]),
         )
         .style(theme::controls_panel_style)
         .width(Fill);
@@ -3238,16 +3624,17 @@ impl AutoCamApp {
     }
 
     /// SEPARATE SETTINGS WINDOW VIEW:
-    /// High-performance, zero stutter, white sliders, custom shortcut manager.
+    /// High-performance modern desktop settings dialog with responsive sidebar navigation,
+    /// Basic vs Advance camera controls, customizable view button visibility, theme palettes & typography scaling.
     fn view_settings_window(&self, window_id: window::Id) -> Element<'_, Message> {
         // Title Bar for Settings Window
         let header = mouse_area(
             container(
                 row![
                     render_svg(icons::ICON_SETTINGS, 16.0, true, false),
-                    text("AutoCam Engine & Driver Settings")
-                        .size(13)
-                        .color(theme::COLOR_TEXT),
+                    text("Settings")
+                        .size(theme::font_size(13))
+                        .color(theme::color_text()),
                     Space::new().width(Fill),
                     render_icon_btn(
                         icons::ICON_CLOSE,
@@ -3267,701 +3654,1237 @@ impl AutoCamApp {
         )
         .on_press(Message::DragWindow(window_id));
 
-        // SECTION 1: Video Device & Resolution
-        let btn_1080p = if self.supported_resolutions.contains(&VideoResolution::Fhd1080p) {
-            button(text("1080p FHD").size(11))
-                .on_press(Message::SetResolution(VideoResolution::Fhd1080p))
-                .style(theme::clean_button_style(
-                    self.resolution == VideoResolution::Fhd1080p,
-                    false,
-                ))
-                .padding([4, 12])
-        } else {
-            button(text("1080p (Unsupported)").size(11))
-                .style(theme::disabled_button_style)
-                .padding([4, 12])
-        };
+        // LEFT SIDEBAR: Desktop Settings Navigation matching standard system settings
+        let sidebar = container(
+            column![
+                container(
+                    text("Settings")
+                        .size(theme::font_size(11))
+                        .color(theme::color_text_muted())
+                )
+                .padding([4, 10]),
+                sidebar_item(SettingsTab::General, "General", icons::ICON_CAMERA, self.settings_tab == SettingsTab::General),
+                sidebar_item(SettingsTab::Application, "Application", icons::ICON_LAYOUT, self.settings_tab == SettingsTab::Application),
+                sidebar_item(SettingsTab::Appearance, "Appearance", icons::ICON_PALETTE, self.settings_tab == SettingsTab::Appearance),
+                sidebar_item(SettingsTab::Shortcuts, "Shortcuts", icons::ICON_KEYBOARD, self.settings_tab == SettingsTab::Shortcuts),
+                sidebar_item(SettingsTab::Notifications, "Notifications", icons::ICON_BELL, self.settings_tab == SettingsTab::Notifications),
+                sidebar_item(SettingsTab::Storage, "Storage & Data", icons::ICON_HARDDRIVE, self.settings_tab == SettingsTab::Storage),
+                sidebar_item(SettingsTab::About, "About", icons::ICON_INFO, self.settings_tab == SettingsTab::About),
+            ]
+            .spacing(3)
+            .padding([10, 8]),
+        )
+        .style(theme::sidebar_container_style)
+        .width(Length::Fixed(195.0))
+        .height(Fill);
 
-        let dev_section = column![
-            text("1. Video Device & Hardware Stream").size(11).color(theme::COLOR_TEXT_MUTED),
-            container(
-                column![
-                    row![
-                        text("Camera Device:").size(11).color(theme::COLOR_TEXT),
-                        Space::new().width(Fill),
-                        pick_list(
-                            self.available_devices.clone(),
-                            self.selected_device.clone(),
-                            Message::DeviceSelected,
-                        )
-                        .style(theme::pick_list_style)
-                        .menu_style(theme::menu_style)
-                        .text_size(11)
-                        .padding([3, 8]),
-                        render_icon_btn(
-                            icons::ICON_REFRESH,
-                            "Refresh Devices",
-                            Message::RefreshDevices,
+        let vertical_divider = container(Space::new().width(Length::Fixed(1.0)).height(Fill))
+            .style(|_: &Theme| container::Style {
+                background: Some(Background::Color(theme::color_border())),
+                ..Default::default()
+            });
+
+        // RIGHT CONTENT PANEL: Dynamic by selected sidebar tab
+        let content_panel: Element<'_, Message> = match self.settings_tab {
+            SettingsTab::General => {
+                let btn_1080p = if self.supported_resolutions.contains(&VideoResolution::Fhd1080p) {
+                    button(text("1080p FHD").size(theme::font_size(11)))
+                        .on_press(Message::SetResolution(VideoResolution::Fhd1080p))
+                        .style(theme::clean_button_style(
+                            self.resolution == VideoResolution::Fhd1080p,
                             false,
-                            false,
-                            tooltip::Position::Bottom,
-                        ),
-                    ]
-                    .align_y(Alignment::Center),
-                    row![
-                        text("Resolution Target:").size(11).color(theme::COLOR_TEXT),
-                        Space::new().width(Fill),
-                        button(text("720p HD").size(11))
-                            .on_press(Message::SetResolution(VideoResolution::Hd720p))
-                            .style(theme::clean_button_style(
-                                self.resolution == VideoResolution::Hd720p,
-                                false,
-                            ))
-                            .padding([4, 12]),
-                        btn_1080p,
-                    ]
-                    .spacing(8)
-                    .align_y(Alignment::Center),
-                ]
-                .spacing(10)
-                .padding([10, 14]),
-            )
-            .style(theme::settings_inner_box_style)
-            .width(Fill),
-        ]
-        .spacing(6);
+                        ))
+                        .padding([4, 12])
+                } else {
+                    button(text("1080p (Unsupported)").size(theme::font_size(11)))
+                        .style(theme::disabled_button_style)
+                        .padding([4, 12])
+                };
 
-        // SECTION 2: Low-Level Shutter & Anti-Flicker
-        let flicker_section = column![
-            text("2. Shutter Timing & Powerline Frequency").size(11).color(theme::COLOR_TEXT_MUTED),
-            container(
-                column![
-                    row![
-                        column![
-                            text("High-Speed Shutter Sync:").size(11).color(theme::COLOR_TEXT),
-                            text("Minimizes motion blur on fast finger & hardware movement").size(10).color(theme::COLOR_TEXT_MUTED),
-                        ],
-                        Space::new().width(Fill),
-                        button(text(if self.action_shutter { "Active" } else { "Off" }).size(11))
-                            .on_press(Message::ToggleActionShutter)
-                            .style(theme::clean_button_style(self.action_shutter, false))
-                            .padding([3, 10]),
-                    ]
-                    .align_y(Alignment::Center),
-                    row![
-                        column![
-                            text("Anti-Flicker Filter:").size(11).color(theme::COLOR_TEXT),
-                            text("Neutralizes fluorescent/LED light pulsing").size(10).color(theme::COLOR_TEXT_MUTED),
-                        ],
-                        Space::new().width(Fill),
-                        button(text("50 Hz (TH/EU)").size(11))
-                            .on_press(Message::SetAntiFlicker(AntiFlickerMode::Hz50))
-                            .style(theme::clean_button_style(self.anti_flicker == AntiFlickerMode::Hz50, false))
-                            .padding([3, 8]),
-                        button(text("60 Hz (US)").size(11))
-                            .on_press(Message::SetAntiFlicker(AntiFlickerMode::Hz60))
-                            .style(theme::clean_button_style(self.anti_flicker == AntiFlickerMode::Hz60, false))
-                            .padding([3, 8]),
-                        button(text("Off").size(11))
-                            .on_press(Message::SetAntiFlicker(AntiFlickerMode::Off))
-                            .style(theme::clean_button_style(self.anti_flicker == AntiFlickerMode::Off, false))
-                            .padding([3, 8]),
-                    ]
-                    .spacing(6)
-                    .align_y(Alignment::Center),
-                ]
-                .spacing(10)
-                .padding([10, 14]),
-            )
-            .style(theme::settings_inner_box_style)
-            .width(Fill),
-        ]
-        .spacing(6);
-
-        // SECTION 3: Pro Exposure, ISO Sensitivity & Color Temperature (Kelvin)
-        let image_tune_section = column![
-            text("3. Pro Optical Exposure, ISO & White Balance").size(11).color(theme::COLOR_TEXT_MUTED),
-            container(
-                column![
-                    row![
-                        column![
-                            text("Auto Exposure (AE):").size(11).color(theme::COLOR_TEXT),
-                            text("Dynamic ambient light metering & auto shutter/gain").size(10).color(theme::COLOR_TEXT_MUTED),
-                        ],
-                        Space::new().width(Fill),
-                        button(text(if self.auto_ev { "Active" } else { "Off" }).size(11))
-                            .on_press(Message::ToggleAutoEv)
-                            .style(theme::clean_button_style(self.auto_ev, false))
-                            .padding([3, 10]),
-                    ]
-                    .align_y(Alignment::Center),
-                    row![
-                        text(format!("Exposure Bias (EV): {:+.1} EV", self.ev_bias)).size(11).color(theme::COLOR_TEXT),
-                        Space::new().width(Fill),
-                        slider(-3.0..=3.0, self.ev_bias, Message::SetEvBias)
-                            .step(0.1)
-                            .style(theme::clean_slider_style)
-                            .width(Length::Fixed(200.0)),
-                    ]
-                    .align_y(Alignment::Center),
-                    row![
-                        text(format!("ISO Sensitivity: ~{} ({:.1}x)", (self.iso_gain * 100.0) as u32, self.iso_gain)).size(11).color(theme::COLOR_TEXT),
-                        Space::new().width(Fill),
-                        slider(1.0..=6.0, self.iso_gain, Message::SetIsoGain)
-                            .step(0.1)
-                            .style(theme::clean_slider_style)
-                            .width(Length::Fixed(200.0)),
-                    ]
-                    .align_y(Alignment::Center),
-                    row![
-                        column![
-                            text("Auto White Balance (AWB):").size(11).color(theme::COLOR_TEXT),
-                            text("Dynamic Gray-World chromatic adaptation").size(10).color(theme::COLOR_TEXT_MUTED),
-                        ],
-                        Space::new().width(Fill),
-                        button(text(if self.auto_white_balance { "Auto [AWB]" } else { "Manual Kelvin" }).size(11))
-                            .on_press(Message::ToggleAutoWhiteBalance)
-                            .style(theme::clean_button_style(self.auto_white_balance, false))
-                            .padding([3, 10]),
-                    ]
-                    .align_y(Alignment::Center),
-                    if !self.auto_white_balance {
+                let dev_card = column![
+                    text("Video Device & Resolution").size(theme::font_size(11)).color(theme::color_text_muted()),
+                    container(
                         column![
                             row![
-                                text(format!("Color Temperature: {}K", self.manual_kelvin)).size(11).color(theme::COLOR_TEXT),
+                                text("Camera Device:").size(theme::font_size(11)).color(theme::color_text()),
                                 Space::new().width(Fill),
-                                slider(2800..=7500, self.manual_kelvin, Message::SetManualKelvin)
-                                    .step(50u32)
+                                pick_list(
+                                    self.available_devices.clone(),
+                                    self.selected_device.clone(),
+                                    Message::DeviceSelected,
+                                )
+                                .style(theme::pick_list_style)
+                                .menu_style(theme::menu_style)
+                                .text_size(theme::font_size(11))
+                                .padding([3, 8]),
+                                render_icon_btn(
+                                    icons::ICON_REFRESH,
+                                    "Refresh Devices",
+                                    Message::RefreshDevices,
+                                    false,
+                                    false,
+                                    tooltip::Position::Bottom,
+                                ),
+                            ]
+                            .align_y(Alignment::Center),
+                            row![
+                                text("Resolution Target:").size(theme::font_size(11)).color(theme::color_text()),
+                                Space::new().width(Fill),
+                                button(text("720p HD").size(theme::font_size(11)))
+                                    .on_press(Message::SetResolution(VideoResolution::Hd720p))
+                                    .style(theme::clean_button_style(
+                                        self.resolution == VideoResolution::Hd720p,
+                                        false,
+                                    ))
+                                    .padding([4, 12]),
+                                btn_1080p,
+                            ]
+                            .spacing(8)
+                            .align_y(Alignment::Center),
+                        ]
+                        .spacing(10)
+                        .padding([10, 14]),
+                    )
+                    .style(theme::settings_inner_box_style)
+                    .width(Fill),
+                ]
+                .spacing(6);
+
+                let geom_card = column![
+                    text("Orientation, Zoom & Composition Framing").size(theme::font_size(11)).color(theme::color_text_muted()),
+                    container(
+                        column![
+                            row![
+                                text(format!("Digital Zoom: {:.2}x", self.zoom_level)).size(theme::font_size(11)).color(theme::color_text()),
+                                Space::new().width(Fill),
+                                slider(1.0..=4.0, self.zoom_level, Message::SetZoom)
+                                    .step(0.05)
                                     .style(theme::clean_slider_style)
                                     .width(Length::Fixed(200.0)),
                             ]
                             .align_y(Alignment::Center),
                             row![
-                                text("Kelvin Presets:").size(10).color(theme::COLOR_TEXT_MUTED),
+                                text("Mirror Feed:").size(theme::font_size(11)).color(theme::color_text()),
                                 Space::new().width(Fill),
-                                button(text("3200K Tungsten").size(10))
-                                    .on_press(Message::SetManualKelvin(3200))
-                                    .style(theme::clean_button_style(self.manual_kelvin == 3200, false))
-                                    .padding([2, 6]),
-                                button(text("4000K Fluorescent").size(10))
-                                    .on_press(Message::SetManualKelvin(4000))
-                                    .style(theme::clean_button_style(self.manual_kelvin == 4000, false))
-                                    .padding([2, 6]),
-                                button(text("5500K Daylight").size(10))
-                                    .on_press(Message::SetManualKelvin(5500))
-                                    .style(theme::clean_button_style(self.manual_kelvin == 5500, false))
-                                    .padding([2, 6]),
-                                button(text("6500K Cloudy").size(10))
-                                    .on_press(Message::SetManualKelvin(6500))
-                                    .style(theme::clean_button_style(self.manual_kelvin == 6500, false))
-                                    .padding([2, 6]),
+                                button(text(if self.is_flip { "Mirrored [F]" } else { "Normal [F]" }).size(theme::font_size(11)))
+                                    .on_press(Message::ToggleFlip)
+                                    .style(theme::clean_button_style(self.is_flip, false))
+                                    .padding([3, 10]),
+                            ]
+                            .align_y(Alignment::Center),
+                            row![
+                                text("Rotation:").size(theme::font_size(11)).color(theme::color_text()),
+                                Space::new().width(Fill),
+                                button(text("0°").size(theme::font_size(11)))
+                                    .on_press(Message::SetRotation(0))
+                                    .style(theme::clean_button_style(self.rotation_deg == 0, false))
+                                    .padding([3, 8]),
+                                button(text("90°").size(theme::font_size(11)))
+                                    .on_press(Message::SetRotation(90))
+                                    .style(theme::clean_button_style(self.rotation_deg == 90, false))
+                                    .padding([3, 8]),
+                                button(text("180°").size(theme::font_size(11)))
+                                    .on_press(Message::SetRotation(180))
+                                    .style(theme::clean_button_style(self.rotation_deg == 180, false))
+                                    .padding([3, 8]),
+                                button(text("270°").size(theme::font_size(11)))
+                                    .on_press(Message::SetRotation(270))
+                                    .style(theme::clean_button_style(self.rotation_deg == 270, false))
+                                    .padding([3, 8]),
+                            ]
+                            .spacing(6)
+                            .align_y(Alignment::Center),
+                            row![
+                                text("Composition Grid:").size(theme::font_size(11)).color(theme::color_text()),
+                                Space::new().width(Fill),
+                                button(text("Off").size(theme::font_size(11)))
+                                    .on_press(Message::SetGridMode(GridMode::Off))
+                                    .style(theme::clean_button_style(self.grid_mode == GridMode::Off, false))
+                                    .padding([3, 8]),
+                                button(text("3x3 Thirds").size(theme::font_size(11)))
+                                    .on_press(Message::SetGridMode(GridMode::RuleOfThirds))
+                                    .style(theme::clean_button_style(self.grid_mode == GridMode::RuleOfThirds, false))
+                                    .padding([3, 8]),
+                                button(text("Crosshair").size(theme::font_size(11)))
+                                    .on_press(Message::SetGridMode(GridMode::CenterCrosshair))
+                                    .style(theme::clean_button_style(self.grid_mode == GridMode::CenterCrosshair, false))
+                                    .padding([3, 8]),
+                                button(text("Golden Ratio φ").size(theme::font_size(11)))
+                                    .on_press(Message::SetGridMode(GridMode::GoldenRatio))
+                                    .style(theme::clean_button_style(self.grid_mode == GridMode::GoldenRatio, false))
+                                    .padding([3, 8]),
+                                button(text("Safe 90%").size(theme::font_size(11)))
+                                    .on_press(Message::SetGridMode(GridMode::SafeMargin))
+                                    .style(theme::clean_button_style(self.grid_mode == GridMode::SafeMargin, false))
+                                    .padding([3, 8]),
                             ]
                             .spacing(6)
                             .align_y(Alignment::Center),
                         ]
-                        .spacing(6)
-                    } else {
-                        column![].into()
-                    },
-                    row![
-                        text(format!("Brightness Offset: {}", self.brightness)).size(11).color(theme::COLOR_TEXT),
-                        Space::new().width(Fill),
-                        slider(-100..=100, self.brightness, Message::SetBrightness)
-                            .style(theme::clean_slider_style)
-                            .width(Length::Fixed(200.0)),
-                    ]
-                    .align_y(Alignment::Center),
-                    row![
-                        text(format!("Contrast Curve: {:.2}x", self.contrast)).size(11).color(theme::COLOR_TEXT),
-                        Space::new().width(Fill),
-                        slider(0.5..=2.0, self.contrast, Message::SetContrast)
-                            .step(0.05)
-                            .style(theme::clean_slider_style)
-                            .width(Length::Fixed(200.0)),
-                    ]
-                    .align_y(Alignment::Center),
-                    row![
-                        text(format!("Color Saturation: {:.2}x", self.saturation)).size(11).color(theme::COLOR_TEXT),
-                        Space::new().width(Fill),
-                        slider(0.0..=2.0, self.saturation, Message::SetSaturation)
-                            .step(0.05)
-                            .style(theme::clean_slider_style)
-                            .width(Length::Fixed(200.0)),
-                    ]
-                    .align_y(Alignment::Center),
+                        .spacing(8)
+                        .padding([10, 14]),
+                    )
+                    .style(theme::settings_inner_box_style)
+                    .width(Fill),
                 ]
-                .spacing(8)
-                .padding([10, 14]),
-            )
-            .style(theme::settings_inner_box_style)
-            .width(Fill),
-        ]
-        .spacing(6);
+                .spacing(6);
 
-        // SECTION 4: Creative Picture Profile & Film Look
-        let profile_section = column![
-            text("4. Creative Picture Profile & Tone Curve").size(11).color(theme::COLOR_TEXT_MUTED),
-            container(
-                column![
-                    row![
+                let auto_card = column![
+                    text("Basic Auto Exposure & White Balance").size(theme::font_size(11)).color(theme::color_text_muted()),
+                    container(
                         column![
-                            text("Profile Emulation:").size(11).color(theme::COLOR_TEXT),
-                            text("Color science curves for live presentation & post-production").size(10).color(theme::COLOR_TEXT_MUTED),
-                        ],
-                        Space::new().width(Fill),
-                        button(text("Neutral").size(11))
-                            .on_press(Message::SetColorProfile(ColorProfile::Neutral))
-                            .style(theme::clean_button_style(self.color_profile == ColorProfile::Neutral, false))
-                            .padding([3, 8]),
-                        button(text("Vivid").size(11))
-                            .on_press(Message::SetColorProfile(ColorProfile::Vivid))
-                            .style(theme::clean_button_style(self.color_profile == ColorProfile::Vivid, false))
-                            .padding([3, 8]),
-                        button(text("Cinema Log").size(11))
-                            .on_press(Message::SetColorProfile(ColorProfile::CinemaLog))
-                            .style(theme::clean_button_style(self.color_profile == ColorProfile::CinemaLog, false))
-                            .padding([3, 8]),
-                        button(text("B&W").size(11))
-                            .on_press(Message::SetColorProfile(ColorProfile::BwMonochrome))
-                            .style(theme::clean_button_style(self.color_profile == ColorProfile::BwMonochrome, false))
-                            .padding([3, 8]),
-                    ]
-                    .spacing(6)
-                    .align_y(Alignment::Center),
-                ]
-                .spacing(8)
-                .padding([10, 14]),
-            )
-            .style(theme::settings_inner_box_style)
-            .width(Fill),
-        ]
-        .spacing(6);
-
-        // SECTION 5: Geometric Orientation, Zoom & Framing
-        let geom_section = column![
-            text("5. Geometry & Composition Framing").size(11).color(theme::COLOR_TEXT_MUTED),
-            container(
-                column![
-                    row![
-                        text(format!("Digital Zoom: {:.2}x", self.zoom_level)).size(11).color(theme::COLOR_TEXT),
-                        Space::new().width(Fill),
-                        slider(1.0..=4.0, self.zoom_level, Message::SetZoom)
-                            .step(0.05)
-                            .style(theme::clean_slider_style)
-                            .width(Length::Fixed(200.0)),
-                    ]
-                    .align_y(Alignment::Center),
-                    row![
-                        text("Mirror Feed:").size(11).color(theme::COLOR_TEXT),
-                        Space::new().width(Fill),
-                        button(text(if self.is_flip { "Mirrored [F]" } else { "Normal [F]" }).size(11))
-                            .on_press(Message::ToggleFlip)
-                            .style(theme::clean_button_style(self.is_flip, false))
-                            .padding([3, 10]),
-                    ]
-                    .align_y(Alignment::Center),
-                    row![
-                        text("Rotation:").size(11).color(theme::COLOR_TEXT),
-                        Space::new().width(Fill),
-                        button(text("0°").size(11))
-                            .on_press(Message::SetRotation(0))
-                            .style(theme::clean_button_style(self.rotation_deg == 0, false))
-                            .padding([3, 8]),
-                        button(text("90°").size(11))
-                            .on_press(Message::SetRotation(90))
-                            .style(theme::clean_button_style(self.rotation_deg == 90, false))
-                            .padding([3, 8]),
-                        button(text("180°").size(11))
-                            .on_press(Message::SetRotation(180))
-                            .style(theme::clean_button_style(self.rotation_deg == 180, false))
-                            .padding([3, 8]),
-                        button(text("270°").size(11))
-                            .on_press(Message::SetRotation(270))
-                            .style(theme::clean_button_style(self.rotation_deg == 270, false))
-                            .padding([3, 8]),
-                    ]
-                    .spacing(6)
-                    .align_y(Alignment::Center),
-                    row![
-                        text("Composition Grid:").size(11).color(theme::COLOR_TEXT),
-                        Space::new().width(Fill),
-                        button(text("Off").size(11))
-                            .on_press(Message::SetGridMode(GridMode::Off))
-                            .style(theme::clean_button_style(self.grid_mode == GridMode::Off, false))
-                            .padding([3, 8]),
-                        button(text("3x3 Thirds").size(11))
-                            .on_press(Message::SetGridMode(GridMode::RuleOfThirds))
-                            .style(theme::clean_button_style(self.grid_mode == GridMode::RuleOfThirds, false))
-                            .padding([3, 8]),
-                        button(text("Crosshair").size(11))
-                            .on_press(Message::SetGridMode(GridMode::CenterCrosshair))
-                            .style(theme::clean_button_style(self.grid_mode == GridMode::CenterCrosshair, false))
-                            .padding([3, 8]),
-                        button(text("Golden Ratio φ").size(11))
-                            .on_press(Message::SetGridMode(GridMode::GoldenRatio))
-                            .style(theme::clean_button_style(self.grid_mode == GridMode::GoldenRatio, false))
-                            .padding([3, 8]),
-                        button(text("Safe 90%").size(11))
-                            .on_press(Message::SetGridMode(GridMode::SafeMargin))
-                            .style(theme::clean_button_style(self.grid_mode == GridMode::SafeMargin, false))
-                            .padding([3, 8]),
-                    ]
-                    .spacing(6)
-                    .align_y(Alignment::Center),
-                ]
-                .spacing(8)
-                .padding([10, 14]),
-            )
-            .style(theme::settings_inner_box_style)
-            .width(Fill),
-        ]
-        .spacing(6);
-
-        // SECTION 6: AI, DSP Filters & Focus Assist
-        let ai_section = column![
-            text("6. AI, DSP Filters & Focus Assist").size(11).color(theme::COLOR_TEXT_MUTED),
-            container(
-                column![
-                    row![
-                        column![
-                            text("CAS Adaptive Sharpening:").size(11).color(theme::COLOR_TEXT),
-                            text("Clean contrast-adaptive high-pass edge crisping").size(10).color(theme::COLOR_TEXT_MUTED),
-                        ],
-                        Space::new().width(Fill),
-                        button(text(if self.cas_sharpen { "Active" } else { "Off" }).size(11))
-                            .on_press(Message::ToggleCasSharpen)
-                            .style(theme::clean_button_style(self.cas_sharpen, false))
-                            .padding([3, 10]),
-                    ]
-                    .align_y(Alignment::Center),
-                    if self.cas_sharpen {
-                        row![
-                            text(format!("CAS Intensity: {:.2}", self.cas_intensity)).size(11).color(theme::COLOR_TEXT),
-                            Space::new().width(Fill),
-                            slider(0.0..=1.0f32, self.cas_intensity, Message::SetCasIntensity)
-                                .step(0.05f32)
-                                .style(theme::clean_slider_style)
-                                .width(Length::Fixed(200.0)),
+                            row![
+                                column![
+                                    text("Auto Exposure (AE):").size(theme::font_size(11)).color(theme::color_text()),
+                                    text("Dynamic ambient light metering & auto shutter/gain").size(theme::font_size(10)).color(theme::color_text_muted()),
+                                ],
+                                Space::new().width(Fill),
+                                button(text(if self.auto_ev { "Active" } else { "Off" }).size(theme::font_size(11)))
+                                    .on_press(Message::ToggleAutoEv)
+                                    .style(theme::clean_button_style(self.auto_ev, false))
+                                    .padding([3, 10]),
+                            ]
+                            .align_y(Alignment::Center),
+                            row![
+                                column![
+                                    text("Auto White Balance (AWB):").size(theme::font_size(11)).color(theme::color_text()),
+                                    text("Dynamic Gray-World chromatic temperature adaptation").size(theme::font_size(10)).color(theme::color_text_muted()),
+                                ],
+                                Space::new().width(Fill),
+                                button(text(if self.auto_white_balance { "Active" } else { "Off" }).size(theme::font_size(11)))
+                                    .on_press(Message::ToggleAutoWhiteBalance)
+                                    .style(theme::clean_button_style(self.auto_white_balance, false))
+                                    .padding([3, 10]),
+                            ]
+                            .align_y(Alignment::Center),
                         ]
-                        .align_y(Alignment::Center)
-                    } else {
-                        row![].into()
-                    },
-                    row![
-                        column![
-                            text("Hardware Focus Peaking:").size(11).color(theme::COLOR_TEXT),
-                            text("Highlights in-focus edges with green contours").size(10).color(theme::COLOR_TEXT_MUTED),
-                        ],
-                        Space::new().width(Fill),
-                        button(text(if self.focus_peaking { "Active" } else { "Off" }).size(11))
-                            .on_press(Message::ToggleFocusPeaking)
-                            .style(theme::clean_button_style(self.focus_peaking, false))
-                            .padding([3, 10]),
+                        .spacing(10)
+                        .padding([10, 14]),
+                    )
+                    .style(theme::settings_inner_box_style)
+                    .width(Fill),
+                ]
+                .spacing(6);
+
+                let mut sections: Vec<Element<'_, Message>> = vec![dev_card.into(), geom_card.into(), auto_card.into()];
+
+                // IF ADVANCE MODE: append deep camera engineering controls
+                if self.camera_settings_mode == CameraSettingsMode::Advance {
+                    let flicker_card = column![
+                        text("Shutter Timing & Powerline Frequency").size(theme::font_size(11)).color(theme::color_text_muted()),
+                        container(
+                            column![
+                                row![
+                                    column![
+                                        text("High-Speed Shutter Sync:").size(theme::font_size(11)).color(theme::color_text()),
+                                        text("Minimizes motion blur on fast finger & hardware movement").size(theme::font_size(10)).color(theme::color_text_muted()),
+                                    ],
+                                    Space::new().width(Fill),
+                                    button(text(if self.action_shutter { "Active" } else { "Off" }).size(theme::font_size(11)))
+                                        .on_press(Message::ToggleActionShutter)
+                                        .style(theme::clean_button_style(self.action_shutter, false))
+                                        .padding([3, 10]),
+                                ]
+                                .align_y(Alignment::Center),
+                                row![
+                                    column![
+                                        text("Anti-Flicker Filter:").size(theme::font_size(11)).color(theme::color_text()),
+                                        text("Neutralizes fluorescent/LED light pulsing").size(theme::font_size(10)).color(theme::color_text_muted()),
+                                    ],
+                                    Space::new().width(Fill),
+                                    button(text("50 Hz (TH/EU)").size(theme::font_size(11)))
+                                        .on_press(Message::SetAntiFlicker(AntiFlickerMode::Hz50))
+                                        .style(theme::clean_button_style(self.anti_flicker == AntiFlickerMode::Hz50, false))
+                                        .padding([3, 8]),
+                                    button(text("60 Hz (US)").size(theme::font_size(11)))
+                                        .on_press(Message::SetAntiFlicker(AntiFlickerMode::Hz60))
+                                        .style(theme::clean_button_style(self.anti_flicker == AntiFlickerMode::Hz60, false))
+                                        .padding([3, 8]),
+                                    button(text("Off").size(theme::font_size(11)))
+                                        .on_press(Message::SetAntiFlicker(AntiFlickerMode::Off))
+                                        .style(theme::clean_button_style(self.anti_flicker == AntiFlickerMode::Off, false))
+                                        .padding([3, 8]),
+                                ]
+                                .spacing(6)
+                                .align_y(Alignment::Center),
+                            ]
+                            .spacing(10)
+                            .padding([10, 14]),
+                        )
+                        .style(theme::settings_inner_box_style)
+                        .width(Fill),
                     ]
-                    .align_y(Alignment::Center),
-                    row![
-                        column![
-                            text("Face Tracking HUD Corner Brackets:").size(11).color(theme::COLOR_TEXT),
-                            text("Real-time presenter face targeting overlay").size(10).color(theme::COLOR_TEXT_MUTED),
-                        ],
-                        Space::new().width(Fill),
-                        button(text(if self.face_detection { "Active" } else { "Off" }).size(11))
-                            .on_press(Message::ToggleFaceDetection)
-                            .style(theme::clean_button_style(self.face_detection, false))
-                            .padding([3, 10]),
+                    .spacing(6);
+
+                    let pro_exposure_card = column![
+                        text("Pro Optical Exposure, ISO & White Balance (Kelvin)").size(theme::font_size(11)).color(theme::color_text_muted()),
+                        container(
+                            column![
+                                row![
+                                    text(format!("Exposure Bias (EV): {:+.1} EV", self.ev_bias)).size(theme::font_size(11)).color(theme::color_text()),
+                                    Space::new().width(Fill),
+                                    slider(-3.0..=3.0, self.ev_bias, Message::SetEvBias)
+                                        .step(0.1)
+                                        .style(theme::clean_slider_style)
+                                        .width(Length::Fixed(200.0)),
+                                ]
+                                .align_y(Alignment::Center),
+                                row![
+                                    text(format!("ISO Sensitivity: ~{} ({:.1}x)", (self.iso_gain * 100.0) as u32, self.iso_gain)).size(theme::font_size(11)).color(theme::color_text()),
+                                    Space::new().width(Fill),
+                                    slider(1.0..=6.0, self.iso_gain, Message::SetIsoGain)
+                                        .step(0.1)
+                                        .style(theme::clean_slider_style)
+                                        .width(Length::Fixed(200.0)),
+                                ]
+                                .align_y(Alignment::Center),
+                                if !self.auto_white_balance {
+                                    column![
+                                        row![
+                                            text(format!("Color Temperature: {}K", self.manual_kelvin)).size(theme::font_size(11)).color(theme::color_text()),
+                                            Space::new().width(Fill),
+                                            slider(2800..=7500, self.manual_kelvin, Message::SetManualKelvin)
+                                                .step(50u32)
+                                                .style(theme::clean_slider_style)
+                                                .width(Length::Fixed(200.0)),
+                                        ]
+                                        .align_y(Alignment::Center),
+                                        row![
+                                            text("Kelvin Presets:").size(theme::font_size(10)).color(theme::color_text_muted()),
+                                            Space::new().width(Fill),
+                                            button(text("3200K Tungsten").size(theme::font_size(10)))
+                                                .on_press(Message::SetManualKelvin(3200))
+                                                .style(theme::clean_button_style(self.manual_kelvin == 3200, false))
+                                                .padding([2, 6]),
+                                            button(text("4000K Fluorescent").size(theme::font_size(10)))
+                                                .on_press(Message::SetManualKelvin(4000))
+                                                .style(theme::clean_button_style(self.manual_kelvin == 4000, false))
+                                                .padding([2, 6]),
+                                            button(text("5500K Daylight").size(theme::font_size(10)))
+                                                .on_press(Message::SetManualKelvin(5500))
+                                                .style(theme::clean_button_style(self.manual_kelvin == 5500, false))
+                                                .padding([2, 6]),
+                                            button(text("6500K Cloudy").size(theme::font_size(10)))
+                                                .on_press(Message::SetManualKelvin(6500))
+                                                .style(theme::clean_button_style(self.manual_kelvin == 6500, false))
+                                                .padding([2, 6]),
+                                        ]
+                                        .spacing(6)
+                                        .align_y(Alignment::Center),
+                                    ]
+                                    .spacing(6)
+                                } else {
+                                    column![].into()
+                                },
+                                row![
+                                    text(format!("Brightness Offset: {}", self.brightness)).size(theme::font_size(11)).color(theme::color_text()),
+                                    Space::new().width(Fill),
+                                    slider(-100..=100, self.brightness, Message::SetBrightness)
+                                        .style(theme::clean_slider_style)
+                                        .width(Length::Fixed(200.0)),
+                                ]
+                                .align_y(Alignment::Center),
+                                row![
+                                    text(format!("Contrast Curve: {:.2}x", self.contrast)).size(theme::font_size(11)).color(theme::color_text()),
+                                    Space::new().width(Fill),
+                                    slider(0.5..=2.0, self.contrast, Message::SetContrast)
+                                        .step(0.05)
+                                        .style(theme::clean_slider_style)
+                                        .width(Length::Fixed(200.0)),
+                                ]
+                                .align_y(Alignment::Center),
+                                row![
+                                    text(format!("Color Saturation: {:.2}x", self.saturation)).size(theme::font_size(11)).color(theme::color_text()),
+                                    Space::new().width(Fill),
+                                    slider(0.0..=2.0, self.saturation, Message::SetSaturation)
+                                        .step(0.05)
+                                        .style(theme::clean_slider_style)
+                                        .width(Length::Fixed(200.0)),
+                                ]
+                                .align_y(Alignment::Center),
+                            ]
+                            .spacing(8)
+                            .padding([10, 14]),
+                        )
+                        .style(theme::settings_inner_box_style)
+                        .width(Fill),
                     ]
-                    .align_y(Alignment::Center),
-                    row![
-                        column![
-                            text("60 FPS Inter-Frame Interpolation:").size(11).color(theme::COLOR_TEXT),
-                            text("Synthesizes smooth in-between video frames").size(10).color(theme::COLOR_TEXT_MUTED),
-                        ],
-                        Space::new().width(Fill),
-                        button(text(if self.frame_interpolation { "Active" } else { "Off" }).size(11))
-                            .on_press(Message::ToggleFrameInterpolation)
-                            .style(theme::clean_button_style(self.frame_interpolation, false))
-                            .padding([3, 10]),
+                    .spacing(6);
+
+                    let profile_card = column![
+                        text("Creative Picture Profile & Tone Curve").size(theme::font_size(11)).color(theme::color_text_muted()),
+                        container(
+                            column![
+                                row![
+                                    column![
+                                        text("Profile Emulation:").size(theme::font_size(11)).color(theme::color_text()),
+                                        text("Color science curves for live presentation & post-production").size(theme::font_size(10)).color(theme::color_text_muted()),
+                                    ],
+                                    Space::new().width(Fill),
+                                    button(text("Neutral").size(theme::font_size(11)))
+                                        .on_press(Message::SetColorProfile(ColorProfile::Neutral))
+                                        .style(theme::clean_button_style(self.color_profile == ColorProfile::Neutral, false))
+                                        .padding([3, 8]),
+                                    button(text("Vivid").size(theme::font_size(11)))
+                                        .on_press(Message::SetColorProfile(ColorProfile::Vivid))
+                                        .style(theme::clean_button_style(self.color_profile == ColorProfile::Vivid, false))
+                                        .padding([3, 8]),
+                                    button(text("Cinema Log").size(theme::font_size(11)))
+                                        .on_press(Message::SetColorProfile(ColorProfile::CinemaLog))
+                                        .style(theme::clean_button_style(self.color_profile == ColorProfile::CinemaLog, false))
+                                        .padding([3, 8]),
+                                    button(text("B&W").size(theme::font_size(11)))
+                                        .on_press(Message::SetColorProfile(ColorProfile::BwMonochrome))
+                                        .style(theme::clean_button_style(self.color_profile == ColorProfile::BwMonochrome, false))
+                                        .padding([3, 8]),
+                                ]
+                                .spacing(6)
+                                .align_y(Alignment::Center),
+                            ]
+                            .spacing(8)
+                            .padding([10, 14]),
+                        )
+                        .style(theme::settings_inner_box_style)
+                        .width(Fill),
                     ]
+                    .spacing(6);
+
+                    let ai_card = column![
+                        text("AI, DSP Filters & Focus Assist").size(theme::font_size(11)).color(theme::color_text_muted()),
+                        container(
+                            column![
+                                row![
+                                    column![
+                                        text("CAS Adaptive Sharpening:").size(theme::font_size(11)).color(theme::color_text()),
+                                        text("Clean contrast-adaptive high-pass edge crisping").size(theme::font_size(10)).color(theme::color_text_muted()),
+                                    ],
+                                    Space::new().width(Fill),
+                                    button(text(if self.cas_sharpen { "Active" } else { "Off" }).size(theme::font_size(11)))
+                                        .on_press(Message::ToggleCasSharpen)
+                                        .style(theme::clean_button_style(self.cas_sharpen, false))
+                                        .padding([3, 10]),
+                                ]
+                                .align_y(Alignment::Center),
+                                if self.cas_sharpen {
+                                    row![
+                                        text(format!("CAS Intensity: {:.2}", self.cas_intensity)).size(theme::font_size(11)).color(theme::color_text()),
+                                        Space::new().width(Fill),
+                                        slider(0.0..=1.0f32, self.cas_intensity, Message::SetCasIntensity)
+                                            .step(0.05f32)
+                                            .style(theme::clean_slider_style)
+                                            .width(Length::Fixed(200.0)),
+                                    ]
+                                    .align_y(Alignment::Center)
+                                } else {
+                                    row![].into()
+                                },
+                                row![
+                                    column![
+                                        text("Hardware Focus Peaking:").size(theme::font_size(11)).color(theme::color_text()),
+                                        text("Highlights in-focus edges with green contours").size(theme::font_size(10)).color(theme::color_text_muted()),
+                                    ],
+                                    Space::new().width(Fill),
+                                    button(text(if self.focus_peaking { "Active" } else { "Off" }).size(theme::font_size(11)))
+                                        .on_press(Message::ToggleFocusPeaking)
+                                        .style(theme::clean_button_style(self.focus_peaking, false))
+                                        .padding([3, 10]),
+                                ]
+                                .align_y(Alignment::Center),
+                                row![
+                                    column![
+                                        text("Face Tracking HUD Corner Brackets:").size(theme::font_size(11)).color(theme::color_text()),
+                                        text("Real-time presenter face targeting overlay").size(theme::font_size(10)).color(theme::color_text_muted()),
+                                    ],
+                                    Space::new().width(Fill),
+                                    button(text(if self.face_detection { "Active" } else { "Off" }).size(theme::font_size(11)))
+                                        .on_press(Message::ToggleFaceDetection)
+                                        .style(theme::clean_button_style(self.face_detection, false))
+                                        .padding([3, 10]),
+                                ]
+                                .align_y(Alignment::Center),
+                                row![
+                                    column![
+                                        text("60 FPS Inter-Frame Interpolation:").size(theme::font_size(11)).color(theme::color_text()),
+                                        text("Synthesizes smooth in-between video frames").size(theme::font_size(10)).color(theme::color_text_muted()),
+                                    ],
+                                    Space::new().width(Fill),
+                                    button(text(if self.frame_interpolation { "Active" } else { "Off" }).size(theme::font_size(11)))
+                                        .on_press(Message::ToggleFrameInterpolation)
+                                        .style(theme::clean_button_style(self.frame_interpolation, false))
+                                        .padding([3, 10]),
+                                ]
+                                .align_y(Alignment::Center),
+                            ]
+                            .spacing(8)
+                            .padding([10, 14]),
+                        )
+                        .style(theme::settings_inner_box_style)
+                        .width(Fill),
+                    ]
+                    .spacing(6);
+
+                    let denoise_card = column![
+                        text("Denoise & Studio Quality Engine").size(theme::font_size(11)).color(theme::color_text_muted()),
+                        container(
+                            column![
+                                row![
+                                    column![
+                                        text("Temporal Noise Reduction (TNR):").size(theme::font_size(11)).color(theme::color_text()),
+                                        text("Multi-frame motion-adaptive grain filter with studio skin polish").size(theme::font_size(10)).color(theme::color_text_muted()),
+                                    ],
+                                    Space::new().width(Fill),
+                                    button(text("Off").size(theme::font_size(11)))
+                                        .on_press(Message::SetDenoiseMode(DenoiseMode::Off))
+                                        .style(theme::clean_button_style(self.denoise_mode == DenoiseMode::Off, false))
+                                        .padding([3, 8]),
+                                    button(text("Low").size(theme::font_size(11)))
+                                        .on_press(Message::SetDenoiseMode(DenoiseMode::Low))
+                                        .style(theme::clean_button_style(self.denoise_mode == DenoiseMode::Low, false))
+                                        .padding([3, 8]),
+                                    button(text("Med").size(theme::font_size(11)))
+                                        .on_press(Message::SetDenoiseMode(DenoiseMode::Medium))
+                                        .style(theme::clean_button_style(self.denoise_mode == DenoiseMode::Medium, false))
+                                        .padding([3, 8]),
+                                    button(text("High").size(theme::font_size(11)))
+                                        .on_press(Message::SetDenoiseMode(DenoiseMode::High))
+                                        .style(theme::clean_button_style(self.denoise_mode == DenoiseMode::High, false))
+                                        .padding([3, 8]),
+                                ]
+                                .spacing(6)
+                                .align_y(Alignment::Center),
+                                row![
+                                    column![
+                                        text("Low-Light Shadow Boost:").size(theme::font_size(11)).color(theme::color_text()),
+                                        text("Recovers dark room shadows smoothly using S-curve lookup").size(theme::font_size(10)).color(theme::color_text_muted()),
+                                    ],
+                                    Space::new().width(Fill),
+                                    button(text(if self.low_light_boost { "Active" } else { "Off" }).size(theme::font_size(11)))
+                                        .on_press(Message::ToggleLowLightBoost)
+                                        .style(theme::clean_button_style(self.low_light_boost, false))
+                                        .padding([3, 10]),
+                                ]
+                                .align_y(Alignment::Center),
+                                row![
+                                    column![
+                                        text("Microphone AI Noise Suppression (RNNoise):").size(theme::font_size(11)).color(theme::color_text()),
+                                        text("Neural real-time background fan and keyboard hum reduction").size(theme::font_size(10)).color(theme::color_text_muted()),
+                                    ],
+                                    Space::new().width(Fill),
+                                    button(text(if self.mic_denoise { "Active" } else { "Off" }).size(theme::font_size(11)))
+                                        .on_press(Message::ToggleMicDenoise)
+                                        .style(theme::clean_button_style(self.mic_denoise, false))
+                                        .padding([3, 10]),
+                                ]
+                                .align_y(Alignment::Center),
+                            ]
+                            .spacing(8)
+                            .padding([10, 14]),
+                        )
+                        .style(theme::settings_inner_box_style)
+                        .width(Fill),
+                    ]
+                    .spacing(6);
+
+                    let vcam_card = column![
+                        text("Virtual Camera Output (External Route)").size(theme::font_size(11)).color(theme::color_text_muted()),
+                        container(
+                            column![
+                                row![
+                                    column![
+                                        text("Virtual Camera Bridge:").size(theme::font_size(11)).color(theme::color_text()),
+                                        text("Output live enhanced feed to OBS, Zoom, Discord, or Google Meet").size(theme::font_size(10)).color(theme::color_text_muted()),
+                                    ],
+                                    Space::new().width(Fill),
+                                    button(text(if self.is_virtual_cam_active { "Active" } else { "Off" }).size(theme::font_size(11)))
+                                        .on_press(Message::ToggleVirtualCamera)
+                                        .style(theme::clean_button_style(self.is_virtual_cam_active, false))
+                                        .padding([3, 10]),
+                                ]
+                                .align_y(Alignment::Center),
+                                row![
+                                    text(format!("Status: {}", self.virtual_cam_status_text))
+                                        .size(theme::font_size(10))
+                                        .color(if self.is_virtual_cam_active { Color::from_rgb(0.4, 0.9, 0.5) } else { theme::color_text_muted() }),
+                                ]
+                                .align_y(Alignment::Center),
+                            ]
+                            .spacing(8)
+                            .padding([10, 14]),
+                        )
+                        .style(theme::settings_inner_box_style)
+                        .width(Fill),
+                    ]
+                    .spacing(6);
+
+                    sections.push(flicker_card.into());
+                    sections.push(pro_exposure_card.into());
+                    sections.push(profile_card.into());
+                    sections.push(ai_card.into());
+                    sections.push(denoise_card.into());
+                    sections.push(vcam_card.into());
+                }
+
+                let page_header = row![
+                    column![
+                        text("General & Camera").size(theme::font_size(15)).color(theme::color_text()),
+                        text("Configure video capture devices, camera resolution, and stream parameters")
+                            .size(theme::font_size(11))
+                            .color(theme::color_text_muted()),
+                    ]
+                    .spacing(2),
+                    Space::new().width(Fill),
+                    // Basic vs Advance Mode Segmented Switch
+                    row![
+                        button(text("Basic").size(theme::font_size(11)))
+                            .on_press(Message::SetCameraSettingsMode(CameraSettingsMode::Basic))
+                            .style(theme::clean_button_style(self.camera_settings_mode == CameraSettingsMode::Basic, false))
+                            .padding([4, 12]),
+                        button(text("Advance (Pro)").size(theme::font_size(11)))
+                            .on_press(Message::SetCameraSettingsMode(CameraSettingsMode::Advance))
+                            .style(theme::clean_button_style(self.camera_settings_mode == CameraSettingsMode::Advance, false))
+                            .padding([4, 12]),
+                    ]
+                    .spacing(4)
                     .align_y(Alignment::Center),
                 ]
-                .spacing(8)
-                .padding([10, 14]),
-            )
-            .style(theme::settings_inner_box_style)
-            .width(Fill),
-        ]
-        .spacing(6);
+                .align_y(Alignment::Center);
 
-        // SECTION 7: Denoise & Studio Quality Engine
-        let denoise_section = column![
-            text("7. Denoise & Studio Quality Engine").size(11).color(theme::COLOR_TEXT_MUTED),
-            container(
                 column![
-                    row![
+                    page_header,
+                    column(sections).spacing(12),
+                ]
+                .spacing(14)
+                .into()
+            }
+
+            SettingsTab::Application => {
+                let page_header = column![
+                    text("Application & View Controls").size(theme::font_size(15)).color(theme::color_text()),
+                    text("Customize which action buttons appear on the main toolbar and configure viewport HUD overlays")
+                        .size(theme::font_size(11))
+                        .color(theme::color_text_muted()),
+                ]
+                .spacing(2);
+
+                let toolbar_buttons_card = column![
+                    text("Main Toolbar Buttons Visibility").size(theme::font_size(11)).color(theme::color_text_muted()),
+                    container(
                         column![
-                            text("Temporal Noise Reduction (TNR):").size(11).color(theme::COLOR_TEXT),
-                            text("Multi-frame motion-adaptive grain filter with studio skin polish").size(10).color(theme::COLOR_TEXT_MUTED),
-                        ],
-                        Space::new().width(Fill),
-                        button(text("Off").size(11))
-                            .on_press(Message::SetDenoiseMode(DenoiseMode::Off))
-                            .style(theme::clean_button_style(self.denoise_mode == DenoiseMode::Off, false))
-                            .padding([3, 8]),
-                        button(text("Low").size(11))
-                            .on_press(Message::SetDenoiseMode(DenoiseMode::Low))
-                            .style(theme::clean_button_style(self.denoise_mode == DenoiseMode::Low, false))
-                            .padding([3, 8]),
-                        button(text("Med").size(11))
-                            .on_press(Message::SetDenoiseMode(DenoiseMode::Medium))
-                            .style(theme::clean_button_style(self.denoise_mode == DenoiseMode::Medium, false))
-                            .padding([3, 8]),
-                        button(text("High").size(11))
-                            .on_press(Message::SetDenoiseMode(DenoiseMode::High))
-                            .style(theme::clean_button_style(self.denoise_mode == DenoiseMode::High, false))
-                            .padding([3, 8]),
+                            text("Toggle buttons shown in the main camera window to create your ideal clean layout:")
+                                .size(theme::font_size(10))
+                                .color(theme::color_text_muted()),
+                            row![
+                                toolbar_toggle_item("Record Video", self.toolbar_visibility.show_record, ToolbarButtonKind::Record),
+                                toolbar_toggle_item("Still Snapshot", self.toolbar_visibility.show_snapshot, ToolbarButtonKind::Snapshot),
+                                toolbar_toggle_item("Mirror Feed", self.toolbar_visibility.show_flip, ToolbarButtonKind::Flip),
+                            ]
+                            .spacing(8),
+                            row![
+                                toolbar_toggle_item("Freeze Frame", self.toolbar_visibility.show_freeze, ToolbarButtonKind::Freeze),
+                                toolbar_toggle_item("Rotate 90°", self.toolbar_visibility.show_rotate, ToolbarButtonKind::Rotate),
+                                toolbar_toggle_item("Digital Zoom", self.toolbar_visibility.show_zoom, ToolbarButtonKind::Zoom),
+                            ]
+                            .spacing(8),
+                            row![
+                                toolbar_toggle_item("Auto Focus", self.toolbar_visibility.show_focus, ToolbarButtonKind::Focus),
+                                toolbar_toggle_item("Auto EV", self.toolbar_visibility.show_ev, ToolbarButtonKind::Ev),
+                                toolbar_toggle_item("Composition Grid", self.toolbar_visibility.show_grid, ToolbarButtonKind::Grid),
+                            ]
+                            .spacing(8),
+                            row![
+                                toolbar_toggle_item("Face HUD Tracking", self.toolbar_visibility.show_face_hud, ToolbarButtonKind::FaceHud),
+                                toolbar_toggle_item("Fullscreen Toggle", self.toolbar_visibility.show_fullscreen, ToolbarButtonKind::Fullscreen),
+                                toolbar_toggle_item("Gallery Thumbnails", self.toolbar_visibility.show_album_strip, ToolbarButtonKind::AlbumStrip),
+                            ]
+                            .spacing(8),
+                            row![
+                                toolbar_toggle_item("Settings Gear", self.toolbar_visibility.show_settings, ToolbarButtonKind::Settings),
+                            ]
+                            .spacing(8),
+                        ]
+                        .spacing(10)
+                        .padding([12, 14]),
+                    )
+                    .style(theme::settings_inner_box_style)
+                    .width(Fill),
+                ]
+                .spacing(6);
+
+                let hud_card = column![
+                    text("Viewport HUD Overlays").size(theme::font_size(11)).color(theme::color_text_muted()),
+                    container(
+                        column![
+                            setting_toggle_row(
+                                "Real-Time Telemetry HUD Overlay:",
+                                "Displays real-time FPS, frame latency (ms), target resolution and stream status on viewport",
+                                self.show_telemetry,
+                                Message::ToggleTelemetry,
+                            ),
+                        ]
+                        .spacing(10)
+                        .padding([12, 14]),
+                    )
+                    .style(theme::settings_inner_box_style)
+                    .width(Fill),
+                ]
+                .spacing(6);
+
+                let window_behavior_card = column![
+                    text("Window Behavior").size(theme::font_size(11)).color(theme::color_text_muted()),
+                    container(
+                        column![
+                            setting_toggle_row(
+                                "Always On Top (Main Window):",
+                                "Keeps the main camera viewport floating above other desktop applications",
+                                self.always_on_top,
+                                Message::ToggleAlwaysOnTop,
+                            ),
+                            setting_toggle_row(
+                                "Lock Aspect Ratio (16:9):",
+                                "Maintains standard video widescreen proportions during manual window resize",
+                                self.keep_aspect_ratio,
+                                Message::ToggleKeepAspectRatio,
+                            ),
+                        ]
+                        .spacing(10)
+                        .padding([12, 14]),
+                    )
+                    .style(theme::settings_inner_box_style)
+                    .width(Fill),
+                ]
+                .spacing(6);
+
+                column![
+                    page_header,
+                    toolbar_buttons_card,
+                    hud_card,
+                    window_behavior_card,
+                ]
+                .spacing(14)
+                .into()
+            }
+
+            SettingsTab::Appearance => {
+                let page_header = column![
+                    text("Appearance & Theme").size(theme::font_size(15)).color(theme::color_text()),
+                    text("Customize visual themes, accent colors, and interface font scaling")
+                        .size(theme::font_size(11))
+                        .color(theme::color_text_muted()),
+                ]
+                .spacing(2);
+
+                let theme_mode_card = column![
+                    text("Color Theme Mode").size(theme::font_size(11)).color(theme::color_text_muted()),
+                    container(
+                        column![
+                            row![
+                                column![
+                                    text("Application Theme:").size(theme::font_size(11)).color(theme::color_text()),
+                                    text("Switch between dark studio mode and crisp clean light theme").size(theme::font_size(10)).color(theme::color_text_muted()),
+                                ],
+                                Space::new().width(Fill),
+                                button(text("Dark").size(theme::font_size(11)))
+                                    .on_press(Message::SetThemeMode(theme::AppThemeMode::Dark))
+                                    .style(theme::clean_button_style(self.theme_mode == theme::AppThemeMode::Dark, false))
+                                    .padding([4, 12]),
+                                button(text("Light").size(theme::font_size(11)))
+                                    .on_press(Message::SetThemeMode(theme::AppThemeMode::Light))
+                                    .style(theme::clean_button_style(self.theme_mode == theme::AppThemeMode::Light, false))
+                                    .padding([4, 12]),
+                                button(text("System").size(theme::font_size(11)))
+                                    .on_press(Message::SetThemeMode(theme::AppThemeMode::System))
+                                    .style(theme::clean_button_style(self.theme_mode == theme::AppThemeMode::System, false))
+                                    .padding([4, 12]),
+                            ]
+                            .spacing(6)
+                            .align_y(Alignment::Center),
+                        ]
+                        .padding([12, 14]),
+                    )
+                    .style(theme::settings_inner_box_style)
+                    .width(Fill),
+                ]
+                .spacing(6);
+
+                let accent_card = column![
+                    text("Accent Highlight Color").size(theme::font_size(11)).color(theme::color_text_muted()),
+                    container(
+                        column![
+                            text("Select an accent color used for active buttons, sliders, and highlights:")
+                                .size(theme::font_size(10))
+                                .color(theme::color_text_muted()),
+                            row![
+                                accent_swatch_button("Zinc (Neutral)", theme::AccentColor::Zinc, self.accent_color == theme::AccentColor::Zinc),
+                                accent_swatch_button("Studio Blue", theme::AccentColor::Blue, self.accent_color == theme::AccentColor::Blue),
+                                accent_swatch_button("Emerald", theme::AccentColor::Emerald, self.accent_color == theme::AccentColor::Emerald),
+                            ]
+                            .spacing(8),
+                            row![
+                                accent_swatch_button("Sunset Amber", theme::AccentColor::Amber, self.accent_color == theme::AccentColor::Amber),
+                                accent_swatch_button("Crimson Rose", theme::AccentColor::Rose, self.accent_color == theme::AccentColor::Rose),
+                                accent_swatch_button("Violet", theme::AccentColor::Violet, self.accent_color == theme::AccentColor::Violet),
+                                accent_swatch_button("Cyber Cyan", theme::AccentColor::Cyan, self.accent_color == theme::AccentColor::Cyan),
+                            ]
+                            .spacing(8),
+                        ]
+                        .spacing(10)
+                        .padding([12, 14]),
+                    )
+                    .style(theme::settings_inner_box_style)
+                    .width(Fill),
+                ]
+                .spacing(6);
+
+                let font_scale_card = column![
+                    text("UI & Font Scale").size(theme::font_size(11)).color(theme::color_text_muted()),
+                    container(
+                        column![
+                            row![
+                                column![
+                                    text("Interface Font Scaling:").size(theme::font_size(11)).color(theme::color_text()),
+                                    text("Adjust overall typography and control sizing for comfortable viewing").size(theme::font_size(10)).color(theme::color_text_muted()),
+                                ],
+                                Space::new().width(Fill),
+                                button(text("Compact (90%)").size(theme::font_size(11)))
+                                    .on_press(Message::SetUiScale(theme::UiFontScale::Compact))
+                                    .style(theme::clean_button_style(self.ui_scale == theme::UiFontScale::Compact, false))
+                                    .padding([4, 10]),
+                                button(text("Standard (100%)").size(theme::font_size(11)))
+                                    .on_press(Message::SetUiScale(theme::UiFontScale::Normal))
+                                    .style(theme::clean_button_style(self.ui_scale == theme::UiFontScale::Normal, false))
+                                    .padding([4, 10]),
+                                button(text("Large (115%)").size(theme::font_size(11)))
+                                    .on_press(Message::SetUiScale(theme::UiFontScale::Large))
+                                    .style(theme::clean_button_style(self.ui_scale == theme::UiFontScale::Large, false))
+                                    .padding([4, 10]),
+                            ]
+                            .spacing(6)
+                            .align_y(Alignment::Center),
+                        ]
+                        .padding([12, 14]),
+                    )
+                    .style(theme::settings_inner_box_style)
+                    .width(Fill),
+                ]
+                .spacing(6);
+
+                column![
+                    page_header,
+                    theme_mode_card,
+                    accent_card,
+                    font_scale_card,
+                ]
+                .spacing(14)
+                .into()
+            }
+
+            SettingsTab::Shortcuts => {
+                let page_header = row![
+                    column![
+                        text("Keyboard Shortcuts Manager").size(theme::font_size(15)).color(theme::color_text()),
+                        text("Click any shortcut to record a new keybinding. Press Esc to cancel rebinding.")
+                            .size(theme::font_size(11))
+                            .color(theme::color_text_muted()),
+                    ]
+                    .spacing(2),
+                    Space::new().width(Fill),
+                    button(text("Reset to Defaults").size(theme::font_size(10)))
+                        .on_press(Message::ResetShortcuts)
+                        .style(theme::clean_button_style(false, false))
+                        .padding([4, 10]),
+                ]
+                .align_y(Alignment::Center);
+
+                let shortcuts_card = container(
+                    column![
+                        shortcut_config_row("Freeze Live Frame:", format_key(&self.keybindings.freeze), self.rebinding_action == Some(ShortcutAction::Freeze), Message::StartRebinding(ShortcutAction::Freeze)),
+                        shortcut_config_row("Mirror / Flip:", format_key(&self.keybindings.flip), self.rebinding_action == Some(ShortcutAction::Flip), Message::StartRebinding(ShortcutAction::Flip)),
+                        shortcut_config_row("Rotate 90°:", format_key(&self.keybindings.rotate), self.rebinding_action == Some(ShortcutAction::Rotate), Message::StartRebinding(ShortcutAction::Rotate)),
+                        shortcut_config_row("Cycle Grid:", format_key(&self.keybindings.grid), self.rebinding_action == Some(ShortcutAction::Grid), Message::StartRebinding(ShortcutAction::Grid)),
+                        shortcut_config_row("Toggle Auto Focus:", format_key(&self.keybindings.auto_focus), self.rebinding_action == Some(ShortcutAction::AutoFocus), Message::StartRebinding(ShortcutAction::AutoFocus)),
+                        shortcut_config_row("Toggle Auto EV:", format_key(&self.keybindings.auto_ev), self.rebinding_action == Some(ShortcutAction::AutoEv), Message::StartRebinding(ShortcutAction::AutoEv)),
+                        shortcut_config_row("Face Tracking HUD:", format_key(&self.keybindings.face_hud), self.rebinding_action == Some(ShortcutAction::FaceHud), Message::StartRebinding(ShortcutAction::FaceHud)),
+                        shortcut_config_row("Frame Interpolation:", format_key(&self.keybindings.interpolation), self.rebinding_action == Some(ShortcutAction::Interpolation), Message::StartRebinding(ShortcutAction::Interpolation)),
+                        shortcut_config_row("Take Snapshot:", format_key(&self.keybindings.snapshot), self.rebinding_action == Some(ShortcutAction::Snapshot), Message::StartRebinding(ShortcutAction::Snapshot)),
+                        shortcut_config_row("Record Video:", format_key(&self.keybindings.record), self.rebinding_action == Some(ShortcutAction::Record), Message::StartRebinding(ShortcutAction::Record)),
+                        shortcut_config_row("Picture-in-Picture:", format_key(&self.keybindings.pip), self.rebinding_action == Some(ShortcutAction::Pip), Message::StartRebinding(ShortcutAction::Pip)),
+                        shortcut_config_row("Toggle Fullscreen:", format_key(&self.keybindings.fullscreen), self.rebinding_action == Some(ShortcutAction::Fullscreen), Message::StartRebinding(ShortcutAction::Fullscreen)),
+                        shortcut_config_row("Toggle Settings:", format_key(&self.keybindings.settings), self.rebinding_action == Some(ShortcutAction::Settings), Message::StartRebinding(ShortcutAction::Settings)),
+                        shortcut_config_row("Zoom In:", format_key(&self.keybindings.zoom_in), self.rebinding_action == Some(ShortcutAction::ZoomIn), Message::StartRebinding(ShortcutAction::ZoomIn)),
+                        shortcut_config_row("Zoom Out:", format_key(&self.keybindings.zoom_out), self.rebinding_action == Some(ShortcutAction::ZoomOut), Message::StartRebinding(ShortcutAction::ZoomOut)),
                     ]
                     .spacing(6)
-                    .align_y(Alignment::Center),
-                    row![
-                        column![
-                            text("Low-Light Shadow Boost:").size(11).color(theme::COLOR_TEXT),
-                            text("Recovers dark room shadows smoothly using S-curve lookup").size(10).color(theme::COLOR_TEXT_MUTED),
-                        ],
-                        Space::new().width(Fill),
-                        button(text(if self.low_light_boost { "Active" } else { "Off" }).size(11))
-                            .on_press(Message::ToggleLowLightBoost)
-                            .style(theme::clean_button_style(self.low_light_boost, false))
-                            .padding([3, 10]),
-                    ]
-                    .align_y(Alignment::Center),
-                    row![
-                        column![
-                            text("Microphone AI Noise Suppression (RNNoise):").size(11).color(theme::COLOR_TEXT),
-                            text("Neural real-time background fan and keyboard hum reduction").size(10).color(theme::COLOR_TEXT_MUTED),
-                        ],
-                        Space::new().width(Fill),
-                        button(text(if self.mic_denoise { "Active" } else { "Off" }).size(11))
-                            .on_press(Message::ToggleMicDenoise)
-                            .style(theme::clean_button_style(self.mic_denoise, false))
-                            .padding([3, 10]),
-                    ]
-                    .align_y(Alignment::Center),
-                ]
-                .spacing(8)
-                .padding([10, 14]),
-            )
-            .style(theme::settings_inner_box_style)
-            .width(Fill),
-        ]
-        .spacing(6);
+                    .padding([10, 14]),
+                )
+                .style(theme::settings_inner_box_style)
+                .width(Fill);
 
-        // SECTION 8: Virtual Camera Output (External Route)
-        let vcam_section = column![
-            text("8. Virtual Camera Output (External Route)").size(11).color(theme::COLOR_TEXT_MUTED),
-            container(
                 column![
-                    row![
-                        column![
-                            text("Virtual Camera Bridge:").size(11).color(theme::COLOR_TEXT),
-                            text("Output live enhanced feed to OBS, Zoom, Discord, or Google Meet").size(10).color(theme::COLOR_TEXT_MUTED),
-                        ],
-                        Space::new().width(Fill),
-                        button(text(if self.is_virtual_cam_active { "Active" } else { "Off" }).size(11))
-                            .on_press(Message::ToggleVirtualCamera)
-                            .style(theme::clean_button_style(self.is_virtual_cam_active, false))
-                            .padding([3, 10]),
-                    ]
-                    .align_y(Alignment::Center),
-                    row![
-                        text(format!("Status: {}", self.virtual_cam_status_text))
-                            .size(10)
-                            .color(if self.is_virtual_cam_active { Color::from_rgb(0.4, 0.9, 0.5) } else { theme::COLOR_TEXT_MUTED }),
-                    ]
-                    .align_y(Alignment::Center),
+                    page_header,
+                    shortcuts_card,
                 ]
-                .spacing(8)
-                .padding([10, 14]),
-            )
-            .style(theme::settings_inner_box_style)
-            .width(Fill),
-        ]
-        .spacing(6);
+                .spacing(14)
+                .into()
+            }
 
-        // SECTION 9: Storage & Capture Data Management
-        let (storage_photos, storage_videos, storage_bytes) = get_storage_stats(&self.captures_path);
-        let storage_stats_text = format!("{} Photos • {} Videos • Total Space: {}", storage_photos, storage_videos, format_size(storage_bytes));
-        let default_captures_path = PathBuf::from("captures");
-        let user_pictures_path = std::env::var("USERPROFILE")
-            .or_else(|_| std::env::var("HOME"))
-            .ok()
-            .map(|u| PathBuf::from(u).join("Pictures").join("AutoCam"));
+            SettingsTab::Notifications => {
+                let page_header = column![
+                    text("Notifications & Audio Feedback").size(theme::font_size(15)).color(theme::color_text()),
+                    text("Configure on-screen toast alerts and camera shutter sound effects")
+                        .size(theme::font_size(11))
+                        .color(theme::color_text_muted()),
+                ]
+                .spacing(2);
 
-        let file_manager_btn_label = if cfg!(target_os = "macos") {
-            "Open in Finder"
-        } else if cfg!(target_os = "linux") {
-            "Open in Files"
-        } else {
-            "Open in Explorer"
+                let toast_card = column![
+                    text("On-Screen Toast Alerts").size(theme::font_size(11)).color(theme::color_text_muted()),
+                    container(
+                        column![
+                            setting_toggle_row(
+                                "Show Toast Notifications:",
+                                "Brief banner alert on snapshots, copying to clipboard, and status changes",
+                                self.notification_config.enable_toast,
+                                Message::ToggleToastEnabled,
+                            ),
+                            row![
+                                column![
+                                    text("Toast Display Duration:").size(theme::font_size(11)).color(theme::color_text()),
+                                    text("Length of time on-screen alerts remain visible").size(theme::font_size(10)).color(theme::color_text_muted()),
+                                ],
+                                Space::new().width(Fill),
+                                button(text("1s").size(theme::font_size(11)))
+                                    .on_press(Message::SetToastDuration(1))
+                                    .style(theme::clean_button_style(self.notification_config.toast_duration_secs == 1, false))
+                                    .padding([3, 8]),
+                                button(text("2s").size(theme::font_size(11)))
+                                    .on_press(Message::SetToastDuration(2))
+                                    .style(theme::clean_button_style(self.notification_config.toast_duration_secs == 2, false))
+                                    .padding([3, 8]),
+                                button(text("3s").size(theme::font_size(11)))
+                                    .on_press(Message::SetToastDuration(3))
+                                    .style(theme::clean_button_style(self.notification_config.toast_duration_secs == 3, false))
+                                    .padding([3, 8]),
+                                button(text("5s").size(theme::font_size(11)))
+                                    .on_press(Message::SetToastDuration(5))
+                                    .style(theme::clean_button_style(self.notification_config.toast_duration_secs == 5, false))
+                                    .padding([3, 8]),
+                            ]
+                            .spacing(6)
+                            .align_y(Alignment::Center),
+                        ]
+                        .spacing(10)
+                        .padding([12, 14]),
+                    )
+                    .style(theme::settings_inner_box_style)
+                    .width(Fill),
+                ]
+                .spacing(6);
+
+                let sound_card = column![
+                    text("Camera Audio Feedback").size(theme::font_size(11)).color(theme::color_text_muted()),
+                    container(
+                        column![
+                            setting_toggle_row(
+                                "Shutter Sound on Snapshot & Record:",
+                                "Play an audible confirmation tone when taking photos or recording videos",
+                                self.notification_config.shutter_sound,
+                                Message::ToggleShutterSound,
+                            ),
+                        ]
+                        .padding([12, 14]),
+                    )
+                    .style(theme::settings_inner_box_style)
+                    .width(Fill),
+                ]
+                .spacing(6);
+
+                let mic_card = column![
+                    text("Audio Input & Microphone Device").size(theme::font_size(11)).color(theme::color_text_muted()),
+                    container(
+                        column![
+                            row![
+                                text("Microphone:").size(theme::font_size(11)).color(theme::color_text()),
+                                Space::new().width(Fill),
+                                pick_list(
+                                    self.available_audio_devices.clone(),
+                                    self.selected_audio_device.clone(),
+                                    Message::AudioDeviceSelected,
+                                )
+                                .style(theme::pick_list_style)
+                                .menu_style(theme::menu_style)
+                                .text_size(theme::font_size(11))
+                                .padding([3, 8]),
+                            ]
+                            .align_y(Alignment::Center),
+                            setting_toggle_row(
+                                "Mute Microphone:",
+                                "Silence microphone input stream during video recordings",
+                                self.is_mic_muted,
+                                Message::ToggleMicMute,
+                            ),
+                        ]
+                        .spacing(10)
+                        .padding([12, 14]),
+                    )
+                    .style(theme::settings_inner_box_style)
+                    .width(Fill),
+                ]
+                .spacing(6);
+
+                column![
+                    page_header,
+                    toast_card,
+                    sound_card,
+                    mic_card,
+                ]
+                .spacing(14)
+                .into()
+            }
+
+            SettingsTab::Storage => {
+                let (storage_photos, storage_videos, storage_bytes) = get_storage_stats(&self.captures_path);
+                let storage_stats_text = format!("{} Photos • {} Videos • Total Space: {}", storage_photos, storage_videos, format_size(storage_bytes));
+                let default_captures_path = PathBuf::from("captures");
+                let user_pictures_path = std::env::var("USERPROFILE")
+                    .or_else(|_| std::env::var("HOME"))
+                    .ok()
+                    .map(|u| PathBuf::from(u).join("Pictures").join("AutoCam"));
+
+                let file_manager_btn_label = if cfg!(target_os = "macos") {
+                    "Open in Finder"
+                } else if cfg!(target_os = "linux") {
+                    "Open in Files"
+                } else {
+                    "Open in Explorer"
+                };
+
+                let page_header = column![
+                    text("Storage & SQLite Database").size(theme::font_size(15)).color(theme::color_text()),
+                    text("Manage captured media files, local disk space, and application settings database")
+                        .size(theme::font_size(11))
+                        .color(theme::color_text_muted()),
+                ]
+                .spacing(2);
+
+                let storage_card = column![
+                    text("Captures Storage Directory").size(theme::font_size(11)).color(theme::color_text_muted()),
+                    container(
+                        column![
+                            row![
+                                column![
+                                    text("Directory Path:").size(theme::font_size(11)).color(theme::color_text()),
+                                    text(format!("Path: {}", self.captures_path.to_string_lossy())).size(theme::font_size(10)).color(theme::color_text_muted()),
+                                ],
+                                Space::new().width(Fill),
+                                button(text(file_manager_btn_label).size(theme::font_size(11)))
+                                    .on_press(Message::OpenCapturesFolder)
+                                    .style(theme::clean_button_style(false, false))
+                                    .padding([3, 10]),
+                            ]
+                            .align_y(Alignment::Center),
+                            row![
+                                text("Quick Location Presets:").size(theme::font_size(10)).color(theme::color_text_muted()),
+                                Space::new().width(Fill),
+                                button(text("Default (./captures)").size(theme::font_size(10)))
+                                    .on_press(Message::SetCapturesPath(default_captures_path.clone()))
+                                    .style(theme::clean_button_style(self.captures_path == default_captures_path, false))
+                                    .padding([2, 8]),
+                                if let Some(ref pic_path) = user_pictures_path {
+                                    let is_pic_active = &self.captures_path == pic_path;
+                                    button(text("Pictures Folder").size(theme::font_size(10)))
+                                        .on_press(Message::SetCapturesPath(pic_path.clone()))
+                                        .style(theme::clean_button_style(is_pic_active, false))
+                                        .padding([2, 8])
+                                } else {
+                                    button(text("").size(0)).padding([0, 0])
+                                },
+                            ]
+                            .spacing(6)
+                            .align_y(Alignment::Center),
+                            row![
+                                column![
+                                    text("Disk Space Occupied:").size(theme::font_size(11)).color(theme::color_text()),
+                                    text(storage_stats_text).size(theme::font_size(10)).color(theme::color_text_muted()),
+                                ],
+                                Space::new().width(Fill),
+                                button(text("Purge All Media").size(theme::font_size(11)))
+                                    .on_press(Message::PurgeAllCaptures)
+                                    .style(theme::danger_menu_item_style)
+                                    .padding([3, 10]),
+                            ]
+                            .align_y(Alignment::Center),
+                        ]
+                        .spacing(10)
+                        .padding([10, 14]),
+                    )
+                    .style(theme::settings_inner_box_style)
+                    .width(Fill),
+                ]
+                .spacing(6);
+
+                let (db_path_str, db_size_bytes, db_key_count) = db::get_db_info();
+                let db_stats_text = format!("Size: {} • Stored Keys: {} (SQLite WAL mode)", format_size(db_size_bytes), db_key_count);
+
+                let db_card = column![
+                    text("Database & Developer Diagnostics").size(theme::font_size(11)).color(theme::color_text_muted()),
+                    container(
+                        column![
+                            row![
+                                column![
+                                    text("SQLite Database File:").size(theme::font_size(11)).color(theme::color_text()),
+                                    text(format!("Location: {}", db_path_str)).size(theme::font_size(10)).color(theme::color_text_muted()),
+                                    text(db_stats_text).size(theme::font_size(10)).color(theme::color_text_muted()),
+                                ],
+                                Space::new().width(Fill),
+                                button(text("Open DB Folder").size(theme::font_size(11)))
+                                    .on_press(Message::OpenDatabaseFolder)
+                                    .style(theme::clean_button_style(false, false))
+                                    .padding([3, 10]),
+                            ]
+                            .align_y(Alignment::Center),
+                            row![
+                                column![
+                                    text("Factory Reset All App Data:").size(theme::font_size(11)).color(theme::color_text()),
+                                    text("Clears SQLite table and restores all camera settings to factory defaults").size(theme::font_size(10)).color(theme::color_text_muted()),
+                                ],
+                                Space::new().width(Fill),
+                                button(text("Factory Reset Database").size(theme::font_size(11)))
+                                    .on_press(Message::ResetFactorySettings)
+                                    .style(theme::danger_menu_item_style)
+                                    .padding([3, 10]),
+                            ]
+                            .align_y(Alignment::Center),
+                        ]
+                        .spacing(10)
+                        .padding([10, 14]),
+                    )
+                    .style(theme::settings_inner_box_style)
+                    .width(Fill),
+                ]
+                .spacing(6);
+
+                column![
+                    page_header,
+                    storage_card,
+                    db_card,
+                ]
+                .spacing(14)
+                .into()
+            }
+
+            SettingsTab::About => {
+                let page_header = column![
+                    text("About AutoCam").size(theme::font_size(15)).color(theme::color_text()),
+                    text("Universal zero-crash cross-platform high-performance camera suite")
+                        .size(theme::font_size(11))
+                        .color(theme::color_text_muted()),
+                ]
+                .spacing(2);
+
+                let info_card = column![
+                    text("Application Information").size(theme::font_size(11)).color(theme::color_text_muted()),
+                    container(
+                        column![
+                            row![
+                                text("Version:").size(theme::font_size(11)).color(theme::color_text()),
+                                Space::new().width(Fill),
+                                text("AutoCam v0.0.17 (Official)").size(theme::font_size(11)).color(theme::color_text_muted()),
+                            ],
+                            row![
+                                text("Architecture & OS:").size(theme::font_size(11)).color(theme::color_text()),
+                                Space::new().width(Fill),
+                                text(format!("{} ({})", std::env::consts::OS, std::env::consts::ARCH)).size(theme::font_size(11)).color(theme::color_text_muted()),
+                            ],
+                            row![
+                                text("Engine Backend:").size(theme::font_size(11)).color(theme::color_text()),
+                                Space::new().width(Fill),
+                                text(if cfg!(target_os = "windows") { "Media Foundation + DirectShow" } else if cfg!(target_os = "macos") { "AVFoundation" } else { "V4L2 (Video4Linux)" })
+                                    .size(theme::font_size(11))
+                                    .color(theme::color_text_muted()),
+                            ],
+                        ]
+                        .spacing(10)
+                        .padding([12, 14]),
+                    )
+                    .style(theme::settings_inner_box_style)
+                    .width(Fill),
+                ]
+                .spacing(6);
+
+                let fallback_card = column![
+                    text("Zero-Crash Fallback Architecture").size(theme::font_size(11)).color(theme::color_text_muted()),
+                    container(
+                        column![
+                            row![
+                                text("5-Tier Format Negotiation:").size(theme::font_size(11)).color(theme::color_text()),
+                                Space::new().width(Fill),
+                                text("MJPEG ➔ NV12 ➔ YUYV ➔ HighestFPS ➔ Native Default").size(theme::font_size(10)).color(Color::from_rgb(0.4, 0.85, 0.5)),
+                            ],
+                            row![
+                                text("Boot Camp Compatibility:").size(theme::font_size(11)).color(theme::color_text()),
+                                Space::new().width(Fill),
+                                text("Uncompressed YUY2 fallback for Intel MacBook cameras").size(theme::font_size(10)).color(theme::color_text_muted()),
+                            ],
+                            row![
+                                text("Lean OS Delay-Load Protection:").size(theme::font_size(11)).color(theme::color_text()),
+                                Space::new().width(Fill),
+                                text("Graceful fallback for Windows N without Media Pack").size(theme::font_size(10)).color(theme::color_text_muted()),
+                            ],
+                            row![
+                                text("Database Fallback:").size(theme::font_size(11)).color(theme::color_text()),
+                                Space::new().width(Fill),
+                                text("In-Memory SQLite fallback if disk is locked").size(theme::font_size(10)).color(theme::color_text_muted()),
+                            ],
+                        ]
+                        .spacing(10)
+                        .padding([12, 14]),
+                    )
+                    .style(theme::settings_inner_box_style)
+                    .width(Fill),
+                ]
+                .spacing(6);
+
+                let links_card = column![
+                    text("Open Source & Community").size(theme::font_size(11)).color(theme::color_text_muted()),
+                    container(
+                        column![
+                            row![
+                                text("GitHub Repository:").size(theme::font_size(11)).color(theme::color_text()),
+                                Space::new().width(Fill),
+                                text("github.com/PichyyyNews/AutoCam").size(theme::font_size(11)).color(theme::color_accent()),
+                            ],
+                            row![
+                                text("License:").size(theme::font_size(11)).color(theme::color_text()),
+                                Space::new().width(Fill),
+                                text("MIT / Apache 2.0 Open Source").size(theme::font_size(11)).color(theme::color_text_muted()),
+                            ],
+                        ]
+                        .spacing(10)
+                        .padding([12, 14]),
+                    )
+                    .style(theme::settings_inner_box_style)
+                    .width(Fill),
+                ]
+                .spacing(6);
+
+                column![
+                    page_header,
+                    info_card,
+                    fallback_card,
+                    links_card,
+                ]
+                .spacing(14)
+                .into()
+            }
         };
 
-        let storage_section = column![
-            text("9. Storage & Capture Data Management").size(11).color(theme::COLOR_TEXT_MUTED),
-            container(
-                column![
-                    row![
-                        column![
-                            text("Captures Storage Directory:").size(11).color(theme::COLOR_TEXT),
-                            text(format!("Path: {}", self.captures_path.to_string_lossy())).size(10).color(theme::COLOR_TEXT_MUTED),
-                        ],
-                        Space::new().width(Fill),
-                        button(text(file_manager_btn_label).size(11))
-                            .on_press(Message::OpenCapturesFolder)
-                            .style(theme::clean_button_style(false, false))
-                            .padding([3, 10]),
-                    ]
-                    .align_y(Alignment::Center),
-                    row![
-                        text("Quick Location Presets:").size(10).color(theme::COLOR_TEXT_MUTED),
-                        Space::new().width(Fill),
-                        button(text("Default (./captures)").size(10))
-                            .on_press(Message::SetCapturesPath(default_captures_path.clone()))
-                            .style(theme::clean_button_style(self.captures_path == default_captures_path, false))
-                            .padding([2, 8]),
-                        if let Some(ref pic_path) = user_pictures_path {
-                            let is_pic_active = &self.captures_path == pic_path;
-                            button(text("Pictures Folder").size(10))
-                                .on_press(Message::SetCapturesPath(pic_path.clone()))
-                                .style(theme::clean_button_style(is_pic_active, false))
-                                .padding([2, 8])
-                        } else {
-                            button(text("").size(0)).padding([0, 0])
-                        },
-                    ]
-                    .spacing(6)
-                    .align_y(Alignment::Center),
-                    row![
-                        column![
-                            text("Disk Space Occupied:").size(11).color(theme::COLOR_TEXT),
-                            text(storage_stats_text).size(10).color(theme::COLOR_TEXT_MUTED),
-                        ],
-                        Space::new().width(Fill),
-                        button(text("Purge All Media").size(11))
-                            .on_press(Message::PurgeAllCaptures)
-                            .style(theme::danger_menu_item_style)
-                            .padding([3, 10]),
-                    ]
-                    .align_y(Alignment::Center),
-                ]
-                .spacing(10)
-                .padding([10, 14]),
-            )
-            .style(theme::settings_inner_box_style)
-            .width(Fill),
-        ]
-        .spacing(6);
-
-        // SECTION 10: Database & Developer Diagnostics
-        let (db_path_str, db_size_bytes, db_key_count) = db::get_db_info();
-        let db_stats_text = format!("Size: {} • Stored Keys: {} (SQLite WAL mode)", format_size(db_size_bytes), db_key_count);
-
-        let dev_tools_section = column![
-            text("10. Database & Developer Diagnostics").size(11).color(theme::COLOR_TEXT_MUTED),
-            container(
-                column![
-                    row![
-                        column![
-                            text("Real-Time Telemetry HUD Overlay:").size(11).color(theme::COLOR_TEXT),
-                            text("Shows live FPS, frame latency (ms), resolution & status on viewport").size(10).color(theme::COLOR_TEXT_MUTED),
-                        ],
-                        Space::new().width(Fill),
-                        button(text(if self.show_telemetry { "Active" } else { "Off" }).size(11))
-                            .on_press(Message::ToggleTelemetry)
-                            .style(theme::clean_button_style(self.show_telemetry, false))
-                            .padding([3, 10]),
-                    ]
-                    .align_y(Alignment::Center),
-                    row![
-                        column![
-                            text("SQLite Database File:").size(11).color(theme::COLOR_TEXT),
-                            text(format!("Location: {}", db_path_str)).size(10).color(theme::COLOR_TEXT_MUTED),
-                            text(db_stats_text).size(10).color(theme::COLOR_TEXT_MUTED),
-                        ],
-                        Space::new().width(Fill),
-                        button(text("Open DB Folder").size(11))
-                            .on_press(Message::OpenDatabaseFolder)
-                            .style(theme::clean_button_style(false, false))
-                            .padding([3, 10]),
-                    ]
-                    .align_y(Alignment::Center),
-                    row![
-                        column![
-                            text("Factory Reset All App Data:").size(11).color(theme::COLOR_TEXT),
-                            text("Clears SQLite table and restores all camera settings to factory defaults").size(10).color(theme::COLOR_TEXT_MUTED),
-                        ],
-                        Space::new().width(Fill),
-                        button(text("Factory Reset Database").size(11))
-                            .on_press(Message::ResetFactorySettings)
-                            .style(theme::danger_menu_item_style)
-                            .padding([3, 10]),
-                    ]
-                    .align_y(Alignment::Center),
-                ]
-                .spacing(10)
-                .padding([10, 14]),
-            )
-            .style(theme::settings_inner_box_style)
-            .width(Fill),
-        ]
-        .spacing(6);
-
-        // SECTION 11: Customizable Keyboard Shortcuts Manager
-        let shortcuts_section = column![
-            row![
-                text("11. Custom Keyboard Shortcuts Manager").size(11).color(theme::COLOR_TEXT_MUTED),
-                Space::new().width(Fill),
-                button(text("Reset to Defaults").size(10))
-                    .on_press(Message::ResetShortcuts)
-                    .style(theme::clean_button_style(false, false))
-                    .padding([2, 6]),
-            ]
-            .align_y(Alignment::Center),
-            container(
-                column![
-                    shortcut_config_row("Freeze Live Frame:", format_key(&self.keybindings.freeze), self.rebinding_action == Some(ShortcutAction::Freeze), Message::StartRebinding(ShortcutAction::Freeze)),
-                    shortcut_config_row("Mirror / Flip:", format_key(&self.keybindings.flip), self.rebinding_action == Some(ShortcutAction::Flip), Message::StartRebinding(ShortcutAction::Flip)),
-                    shortcut_config_row("Rotate 90°:", format_key(&self.keybindings.rotate), self.rebinding_action == Some(ShortcutAction::Rotate), Message::StartRebinding(ShortcutAction::Rotate)),
-                    shortcut_config_row("Cycle Grid:", format_key(&self.keybindings.grid), self.rebinding_action == Some(ShortcutAction::Grid), Message::StartRebinding(ShortcutAction::Grid)),
-                    shortcut_config_row("Toggle Auto Focus:", format_key(&self.keybindings.auto_focus), self.rebinding_action == Some(ShortcutAction::AutoFocus), Message::StartRebinding(ShortcutAction::AutoFocus)),
-                    shortcut_config_row("Toggle Auto EV:", format_key(&self.keybindings.auto_ev), self.rebinding_action == Some(ShortcutAction::AutoEv), Message::StartRebinding(ShortcutAction::AutoEv)),
-                    shortcut_config_row("Face Tracking HUD:", format_key(&self.keybindings.face_hud), self.rebinding_action == Some(ShortcutAction::FaceHud), Message::StartRebinding(ShortcutAction::FaceHud)),
-                    shortcut_config_row("Frame Interpolation:", format_key(&self.keybindings.interpolation), self.rebinding_action == Some(ShortcutAction::Interpolation), Message::StartRebinding(ShortcutAction::Interpolation)),
-                    shortcut_config_row("Take Snapshot:", format_key(&self.keybindings.snapshot), self.rebinding_action == Some(ShortcutAction::Snapshot), Message::StartRebinding(ShortcutAction::Snapshot)),
-                    shortcut_config_row("Record Video:", format_key(&self.keybindings.record), self.rebinding_action == Some(ShortcutAction::Record), Message::StartRebinding(ShortcutAction::Record)),
-                    shortcut_config_row("Picture-in-Picture:", format_key(&self.keybindings.pip), self.rebinding_action == Some(ShortcutAction::Pip), Message::StartRebinding(ShortcutAction::Pip)),
-                    shortcut_config_row("Toggle Fullscreen:", format_key(&self.keybindings.fullscreen), self.rebinding_action == Some(ShortcutAction::Fullscreen), Message::StartRebinding(ShortcutAction::Fullscreen)),
-                    shortcut_config_row("Toggle Settings:", format_key(&self.keybindings.settings), self.rebinding_action == Some(ShortcutAction::Settings), Message::StartRebinding(ShortcutAction::Settings)),
-                    shortcut_config_row("Zoom In:", format_key(&self.keybindings.zoom_in), self.rebinding_action == Some(ShortcutAction::ZoomIn), Message::StartRebinding(ShortcutAction::ZoomIn)),
-                    shortcut_config_row("Zoom Out:", format_key(&self.keybindings.zoom_out), self.rebinding_action == Some(ShortcutAction::ZoomOut), Message::StartRebinding(ShortcutAction::ZoomOut)),
-                ]
-                .spacing(6)
-                .padding([10, 14]),
-            )
-            .style(theme::settings_inner_box_style)
-            .width(Fill),
-        ]
-        .spacing(6);
-
         let bottom_actions = row![
-            button(text("Open Captures Folder").size(11))
-                .on_press(Message::OpenCapturesFolder)
-                .style(theme::clean_button_style(false, false))
-                .padding([5, 12]),
-            button(text("Reset Camera Defaults").size(11))
+            button(text("Reset Camera Defaults").size(theme::font_size(11)))
                 .on_press(Message::ResetDefaults)
                 .style(theme::clean_button_style(false, false))
                 .padding([5, 12]),
             Space::new().width(Fill),
-            button(text("Done").size(11))
+            button(text("Done").size(theme::font_size(11)))
                 .on_press(Message::CloseSettingsWindow)
                 .style(theme::clean_button_style(true, false))
                 .padding([5, 16]),
@@ -3969,28 +4892,26 @@ impl AutoCamApp {
         .spacing(8)
         .align_y(Alignment::Center);
 
-        let scroll_body = scrollable(
+        let right_scroll_body = scrollable(
             column![
-                dev_section,
-                flicker_section,
-                image_tune_section,
-                profile_section,
-                geom_section,
-                ai_section,
-                denoise_section,
-                vcam_section,
-                storage_section,
-                dev_tools_section,
-                shortcuts_section,
+                content_panel,
                 bottom_actions,
             ]
-            .spacing(14)
-            .padding([14, 16]),
+            .spacing(16)
+            .padding([16, 20]),
         )
         .width(Fill)
         .height(Fill);
 
-        let content = column![header, scroll_body]
+        let main_body = row![
+            sidebar,
+            vertical_divider,
+            right_scroll_body,
+        ]
+        .width(Fill)
+        .height(Fill);
+
+        let content = column![header, main_body]
             .width(Fill)
             .height(Fill);
 
@@ -4102,6 +5023,126 @@ impl AutoCamApp {
     }
 }
 
+/// Helper function for sidebar items
+fn sidebar_item<'a>(
+    tab: SettingsTab,
+    label: &'static str,
+    icon_svg: &'static str,
+    is_active: bool,
+) -> Element<'a, Message> {
+    let icon = svg(svg::Handle::from_memory(icon_svg.as_bytes()))
+        .width(Length::Fixed(16.0))
+        .height(Length::Fixed(16.0))
+        .style(move |_theme, _status| svg::Style {
+            color: Some(if is_active {
+                if theme::get_accent_color() == theme::AccentColor::Zinc {
+                    theme::color_text()
+                } else {
+                    theme::color_accent()
+                }
+            } else {
+                theme::color_text_muted()
+            }),
+        });
+
+    let txt = text(label)
+        .size(theme::font_size(12))
+        .color(if is_active {
+            if theme::get_accent_color() == theme::AccentColor::Zinc {
+                theme::color_text()
+            } else {
+                theme::color_accent()
+            }
+        } else {
+            theme::color_text_muted()
+        });
+
+    button(
+        row![icon, txt]
+            .spacing(10)
+            .align_y(Alignment::Center)
+    )
+    .on_press(Message::SetSettingsTab(tab))
+    .style(theme::sidebar_item_style(is_active))
+    .width(Fill)
+    .padding([7, 12])
+    .into()
+}
+
+fn setting_toggle_row<'a>(
+    title: &'static str,
+    subtitle: &'static str,
+    is_active: bool,
+    on_press: Message,
+) -> Element<'a, Message> {
+    row![
+        column![
+            text(title).size(theme::font_size(11)).color(theme::color_text()),
+            text(subtitle).size(theme::font_size(10)).color(theme::color_text_muted()),
+        ]
+        .spacing(2),
+        Space::new().width(Fill),
+        button(text(if is_active { "Active" } else { "Off" }).size(theme::font_size(11)))
+            .on_press(on_press)
+            .style(theme::clean_button_style(is_active, false))
+            .padding([3, 10]),
+    ]
+    .align_y(Alignment::Center)
+    .into()
+}
+
+fn toolbar_toggle_item<'a>(
+    label: &'static str,
+    is_shown: bool,
+    kind: ToolbarButtonKind,
+) -> Element<'a, Message> {
+    button(
+        row![
+            text(if is_shown { "✓" } else { "   " })
+                .size(theme::font_size(11))
+                .color(if is_shown { theme::color_accent() } else { theme::color_text_muted() }),
+            text(label).size(theme::font_size(11)).color(theme::color_text()),
+        ]
+        .spacing(6)
+        .align_y(Alignment::Center),
+    )
+    .on_press(Message::ToggleToolbarButton(kind))
+    .style(theme::clean_button_style(is_shown, false))
+    .padding([4, 10])
+    .into()
+}
+
+fn accent_swatch_button<'a>(
+    label: &'static str,
+    accent: theme::AccentColor,
+    is_selected: bool,
+) -> Element<'a, Message> {
+    let color = accent.color();
+    let swatch = container(Space::new().width(Length::Fixed(12.0)).height(Length::Fixed(12.0)))
+        .style(move |_: &Theme| container::Style {
+            background: Some(Background::Color(color)),
+            border: iced::Border {
+                color: Color::TRANSPARENT,
+                width: 0.0,
+                radius: theme::RADIUS_SM,
+            },
+            ..Default::default()
+        });
+
+    button(
+        row![
+            swatch,
+            text(label).size(theme::font_size(11)).color(theme::color_text()),
+        ]
+        .spacing(6)
+        .align_y(Alignment::Center),
+    )
+    .on_press(Message::SetAccentColor(accent))
+    .style(theme::clean_button_style(is_selected, false))
+    .padding([4, 10])
+    .into()
+}
+
 /// Helper row for shortcut rebinding configuration
 fn shortcut_config_row<'a>(
     description: &'static str,
@@ -4116,9 +5157,9 @@ fn shortcut_config_row<'a>(
     };
 
     row![
-        text(description).size(11).color(theme::COLOR_TEXT),
+        text(description).size(theme::font_size(11)).color(theme::color_text()),
         Space::new().width(Fill),
-        button(text(btn_text).size(11))
+        button(text(btn_text).size(theme::font_size(11)))
             .on_press(on_click)
             .style(theme::clean_button_style(is_rebinding, false))
             .padding([3, 10]),
@@ -4138,7 +5179,7 @@ fn render_svg<'a>(
         .width(Length::Fixed(size))
         .height(Length::Fixed(size))
         .style(|_theme, _status| svg::Style {
-            color: Some(Color::WHITE),
+            color: Some(theme::color_text()),
         })
         .into()
 }
